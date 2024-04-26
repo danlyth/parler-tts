@@ -146,7 +146,7 @@ class DataCollator:
         # Unlike default Parler-TTS we don't have "input_ids" (which they use for descriptions)
 
         # Transposing DAC codes so that we have (bsz, seq_len, num_codebooks)
-        labels = [torch.tensor(feature["labels"]).transpose(0, 1) for feature in features]
+        labels = [feature["labels"].transpose(0, 1) for feature in features]
         labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100) # TODO remove this hardcoded value
         if self.audio_max_length is not None and self.padding == "max_length":
             labels = torch.nn.functional.pad(labels, pad=(0, 0, 0, max(self.audio_max_length - labels.shape[1], 0)))
