@@ -55,11 +55,7 @@ from accelerate.utils.memory import release_memory
 
 from parler_tts import (
     ParlerTTSForConditionalGeneration,
-    ParlerTTSConfig,
-    build_delay_pattern_mask,
-)
-
-from parler_tts.audio_conditioning import AudioConditionEncoder
+    ParlerTTSConfig,)
 
 from training.utils import get_last_checkpoint, rotate_checkpoints, log_pred, log_metric
 from training.arguments import ModelArguments, DataTrainingArguments, ParlerTTSTrainingArguments
@@ -225,9 +221,7 @@ def main():
     # load audio reference encoder
     # audio_ref_encoder = AudioConditionEncoder("microsoft/wavlm-base-plus")
     audio_ref_encoder = AutoModel.from_pretrained("microsoft/wavlm-base-plus") # TODO (Dan) remove this hard-coding
-
-
-    
+    audio_ref_encoder.to(training_args.device)
 
     # 3. Next, let's load the config.
     config = ParlerTTSConfig.from_pretrained(
@@ -290,11 +284,11 @@ def main():
     if training_args.do_train:
         vectorized_datasets["train"] = DatasetLocal(
         # root_audio_dir=data_args.root_audio_dir,
-        root_audio_dir="/Users/danlyth/data/expresso/audio_48khz_short_chunks_ex02_processed",
+        root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
         # root_dac_dir=data_args.root_dac_dir,
-        root_dac_dir="/Users/danlyth/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
+        root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
         # metadata_path=data_args.train_metadata_path,
-        metadata_path="/Users/danlyth/data/expresso/audio_48khz_short_chunks_ex02_processed/train_local.tsv",
+        metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/train_local.tsv",
         prompt_tokenizer=prompt_tokenizer,
         audio_sr=16000, # TODO (Dan) remove these three lines of hard-coding
         audio_ref_len=2,
@@ -312,11 +306,11 @@ def main():
     if training_args.do_eval:
         vectorized_datasets["eval"] = DatasetLocal(
         # root_audio_dir=data_args.root_audio_dir,
-        root_audio_dir="/Users/danlyth/data/expresso/audio_48khz_short_chunks_ex02_processed",
+        root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
         # root_dac_dir=data_args.root_dac_dir,
-        root_dac_dir="/Users/danlyth/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
+        root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
         # metadata_path=data_args.eval_metadata_path,
-        metadata_path="/Users/danlyth/data/expresso/audio_48khz_short_chunks_ex02_processed/dev_local.tsv",
+        metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/dev_local.tsv",
         prompt_tokenizer=prompt_tokenizer,
         audio_sr=16000, # TODO (Dan) remove these three lines of hard-coding
         audio_ref_len=2,
@@ -528,14 +522,12 @@ def main():
             with accelerator.autocast(autocast_handler=autocast_kwargs):
                 if training_args.parallel_mode.value != "distributed": # TODO (Dan) check we're supporting this properly
                     with torch.no_grad(): # Does autocast take care of this?
-                        encoder_outputs = audio_ref_encoder(batch["audio_ref"]).last_hidden_state
+                        encoder_outputs = audio_ref_encoder(batch["audio_ref"])
                 else:
                     with torch.no_grad(): # Does autocast take care of this?
-                        encoder_outputs = audio_ref_encoder(batch["audio_ref"]).last_hidden_state
+                        encoder_outputs = audio_ref_encoder(batch["audio_ref"])
                 batch["encoder_outputs"] = encoder_outputs # Size (batch_size, audio_ref length / downsampling, hidden_size)
-                batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"]) # Can do this because we're not using padding
-
-
+                # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"]) # Can do this because we're not using padding
 
         else:
             # Natural language conditioning
@@ -576,7 +568,7 @@ def main():
                 else:
                     encoder_outputs = audio_ref_encoder(batch["audio_ref"])
                 batch["encoder_outputs"] = encoder_outputs
-                batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
+                # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
 
         else:
             # Natural language conditioning

@@ -2003,18 +2003,8 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
             )
         elif isinstance(encoder_outputs, tuple):
             encoder_outputs = BaseModelOutput(*encoder_outputs)
-        
-        # With the default model, encoder_outputs is of type BaseModelOutputWithPastAndCrossAttentions
-        # and you have to access the hidden states by slicing encoder_outputs[0]
-        # However, with my audio reference model, encoder_outputs is of type tensor and doesn't need slicing
 
-        # Check if encoder_ouputs is of type torch.tensor
-        if isinstance(encoder_outputs, torch.Tensor):
-            # Is from WavLM
-            encoder_hidden_states = encoder_outputs
-            attention_mask = None # TODO (Dan) fix this hack. I don't need an attention mask cos all the reference audios are the same length
-        else:
-            encoder_hidden_states = encoder_outputs[0]
+        encoder_hidden_states = encoder_outputs[0]
 
         # optionally project encoder_hidden_states
         if (
