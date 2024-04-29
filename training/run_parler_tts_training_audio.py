@@ -678,7 +678,8 @@ def main():
                                 blocking=False,
                             )
 
-                if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps):
+                if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1):
+                    #NOTE (Dan) I added this condition to evaluate at the first step, might not want it after debugging
                     train_time += time.time() - train_start
                     # ======================== Evaluating ==============================
                     eval_metrics = []
