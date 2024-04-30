@@ -55,7 +55,11 @@ from accelerate.utils.memory import release_memory
 
 from parler_tts import (
     ParlerTTSForConditionalGeneration,
-    ParlerTTSConfig,)
+    ParlerTTSConfig,
+    build_delay_pattern_mask,
+)
+
+# from parler_tts.audio_conditioning import AudioConditionEncoder
 
 from training.utils import get_last_checkpoint, rotate_checkpoints, log_pred, log_metric
 from training.arguments import ModelArguments, DataTrainingArguments, ParlerTTSTrainingArguments
@@ -223,6 +227,7 @@ def main():
     audio_ref_encoder = AutoModel.from_pretrained("microsoft/wavlm-base-plus") # TODO (Dan) remove this hard-coding
     audio_ref_encoder.to(training_args.device)
 
+
     # 3. Next, let's load the config.
     config = ParlerTTSConfig.from_pretrained(
         model_args.model_name_or_path,
@@ -330,14 +335,17 @@ def main():
     # Let's use word CLAP similary and WER metrics as our evaluation metrics
     def compute_metrics(audios, descriptions, prompts, device="cpu"):
         results = {}
-        input_ids = descriptions
-        texts = description_tokenizer.batch_decode(input_ids, skip_special_tokens=True)
         prompts = prompt_tokenizer.batch_decode(prompts, skip_special_tokens=True)
         audios = [a.cpu().numpy() for a in audios]
-        
-        clap_score = clap_similarity(model_args.clap_model_name_or_path, texts, audios, device)
-        results["clap"] = clap_score
 
+        if descriptions is not None:
+            input_ids = descriptions
+            texts = description_tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+            clap_score = clap_similarity(model_args.clap_model_name_or_path, texts, audios, device)
+            results["clap"] = clap_score
+        else:
+            results["clap"] = 0.0
+            texts = "No descriptions provided"
         word_error, transcriptions = wer(model_args.asr_model_name_or_path,
                                         prompts,
                                         audios,
@@ -594,6 +602,20 @@ def main():
         return metrics
 
     def generate_step(batch):
+        audio_conditioning = True # TODO temp, replace with arg
+        if audio_conditioning:
+            with accelerator.autocast(autocast_handler=autocast_kwargs):
+                if training_args.parallel_mode.value != "distributed": # TODO check we're supporting this properly
+                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+                else:
+                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+                batch["encoder_outputs"] = encoder_outputs
+                # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
+
+            batch.pop("audio_ref", None)
+            batch.pop("audio_ref_attention_mask", None)
+
+
         batch.pop("decoder_attention_mask", None)
         eval_model = accelerator.unwrap_model(model, keep_fp32_wrapper=mixed_precision != "fp16").eval()
         if training_args.torch_compile:
@@ -679,7 +701,7 @@ def main():
                             )
 
                 if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1):
-                    #NOTE (Dan) I added this condition to evaluate at the first step, might not want it after debugging
+                    # TODO (Dan) I added this condition to evaluate at the first step, might not want it after debugging
                     train_time += time.time() - train_start
                     # ======================== Evaluating ==============================
                     eval_metrics = []
@@ -713,15 +735,7 @@ def main():
                         eval_metrics.append(eval_metric)
 
                     if training_args.predict_with_generate:
-                        validation_dataloader = DataLoader(
-                            vectorized_datasets["eval"],
-                            collate_fn=data_collator,
-                            batch_size=per_device_eval_batch_size,
-                            drop_last=False,
-                            num_workers=training_args.dataloader_pin_memory,
-                            pin_memory=training_args.dataloader_pin_memory,
-                        )
-                        validation_dataloader = accelerator.prepare(validation_dataloader)
+
                         # generation
                         for batch in tqdm(
                             validation_dataloader,
@@ -731,14 +745,15 @@ def main():
                         ):
                             generated_audios = generate_step(batch)
                             # Gather all predictions and targets
-                            generated_audios, input_ids, prompts = accelerator.pad_across_processes(
-                                (generated_audios, batch["input_ids"], batch["prompt_input_ids"]), dim=1, pad_index=0
+                            generated_audios, prompts = accelerator.pad_across_processes(
+                                (generated_audios, batch["prompt_input_ids"]), dim=1, pad_index=0 # TODO Dan, we don't have "input_ids" in the batch
                             )
-                            generated_audios, input_ids, prompts = accelerator.gather_for_metrics(
-                                (generated_audios, input_ids, prompts)
+                            generated_audios, prompts = accelerator.gather_for_metrics(
+                                (generated_audios, prompts)
                             )
                             eval_preds.extend(generated_audios.to("cpu"))
-                            eval_descriptions.extend(input_ids.to("cpu"))
+                            # eval_descriptions.extend(input_ids.to("cpu")) # TODO fix this hard-coding
+                            eval_descriptions.extend("No description")
                             eval_prompts.extend(prompts.to("cpu"))
 
                     eval_time = time.time() - eval_start
@@ -751,8 +766,11 @@ def main():
                     # compute metrics
                     metrics_desc = ""
                     if training_args.predict_with_generate:
+                        # metric_values, pred_descriptions, pred_prompts, audios, transcriptions = compute_metrics(
+                        #     eval_preds, eval_descriptions, eval_prompts, accelerator.device
+                        # )
                         metric_values, pred_descriptions, pred_prompts, audios, transcriptions = compute_metrics(
-                            eval_preds, eval_descriptions, eval_prompts, accelerator.device
+                            eval_preds, None, eval_prompts, accelerator.device
                         )
                         eval_metrics.update(metric_values)
                         metrics_desc = " ".join([f"Eval {key}: {value} |" for key, value in metric_values.items()])
