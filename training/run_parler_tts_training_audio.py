@@ -772,6 +772,7 @@ def main():
                         metric_values, pred_descriptions, pred_prompts, audios, transcriptions = compute_metrics(
                             eval_preds, None, eval_prompts, accelerator.device
                         )
+                        pred_descriptions = ["No description" for _ in range(len(pred_prompts))]
                         eval_metrics.update(metric_values)
                         metrics_desc = " ".join([f"Eval {key}: {value} |" for key, value in metric_values.items()])
                         if "wandb" in training_args.report_to:
