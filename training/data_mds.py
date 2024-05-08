@@ -9,6 +9,8 @@ from streaming import StreamingDataset
 from streaming import Stream
 from transformers import AutoTokenizer
 
+from parler_tts.modeling_parler_tts import build_delay_pattern_mask
+
 
 def configure_aws_creds():
     os.environ["S3_ENDPOINT_URL"] = f"https://{os.environ['CF_ACCOUNT_ID']}.r2.cloudflarestorage.com"
@@ -47,8 +49,11 @@ class DatasetMDS(StreamingDataset):
                  streams: list, 
                  batch_size: int, 
                  prompt_tokenizer: AutoTokenizer,
-                 audio_sample_rate: int,
-                 audio_ref_len: int,
+                 audio_sample_rate:int, # audio sample rate for reference encoder, typically 16kHz
+                 audio_ref_len:int, # audio reference length (in seconds) for reference encoder
+                 num_codebooks:int=9, # number of codebooks in the DAC features
+                 audio_encoder_bos_token_id:int=1025, # BOS token id for audio encoder
+                 audio_encoder_eos_token_id:int=1024, # EOS token id for audio encoder
                  **kwargs):
         super().__init__(streams=streams, # list of Stream objects
                          batch_size=batch_size, # necessary for deterministic resumption and optimal performance
@@ -63,6 +68,10 @@ class DatasetMDS(StreamingDataset):
         self.audio_sr = audio_sample_rate
         self.audio_ref_len = audio_ref_len
         self.prompt_tokenizer = prompt_tokenizer
+        self.num_codebooks = num_codebooks
+        self.audio_encoder_bos_token_id = audio_encoder_bos_token_id
+        self.audio_encoder_eos_token_id = audio_encoder_eos_token_id
+        self.bos_labels = torch.ones((1, num_codebooks, 1)) * audio_encoder_bos_token_id
 
        
     def __len__(self):
@@ -99,8 +108,31 @@ class DatasetMDS(StreamingDataset):
 
         audio = audio[start:start + self.audio_sr * self.audio_ref_len]
 
-        # Load DAC codes
-        labels = torch.from_numpy(data["dac"]).unsqueeze(0)
+        # Load DAC codes and re-arrange into the delay pattern
+        labels = torch.tensor(data["dac"]).long() # Shape (n_codebooks, n_frames)
+        labels = labels.unsqueeze(0)
+        # add bos
+        labels = torch.cat([self.bos_labels, labels], dim=-1)
+        
+        labels, delay_pattern_mask = build_delay_pattern_mask(
+            labels,
+            bos_token_id=self.audio_encoder_bos_token_id,
+            pad_token_id=self.audio_encoder_eos_token_id,
+            max_length=labels.shape[-1] + self.num_codebooks,
+            num_codebooks=self.num_codebooks,
+        )
+
+        # the first ids of the delay pattern mask are precisely labels, we use the rest of the labels mask
+        # to take care of EOS
+        # we want labels to look like this:
+        #  - [B, a, b, E, E, E, E]
+        #  - [B, B, c, d, E, E, E]
+        #  - [B, B, B, e, f, E, E]
+        #  - [B, B, B, B, g, h, E]
+        labels = torch.where(delay_pattern_mask == -1, self.audio_encoder_eos_token_id, delay_pattern_mask)
+        # the first timestamp is associated to a row full of BOS, let's get rid of it
+        # we also remove the last timestampts (full of PAD)
+        labels = labels[:, 1:]
 
         # Load transcription
         transcription = data["transcript"]

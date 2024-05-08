@@ -132,6 +132,7 @@ def main():
         mixed_precision=mixed_precision,
         log_with=training_args.report_to,
         project_dir=training_args.output_dir,
+        dispatch_batches=False, # TODO (Dan) testing this as our batches are not all the same length
         kwargs_handlers=kwargs_handlers,
     )
 
@@ -290,6 +291,7 @@ def main():
                                                       audio_ref_len=model_args.audio_ref_len,
                                                       shuffle=True,
                                                       cache_limit=data_args.mds_cache_limit,
+                                                      epoch_size=data_args.max_train_samples # TODO (Dan) check this is working
                                                       )
 
         else:
@@ -327,6 +329,7 @@ def main():
                                                      audio_ref_len=model_args.audio_ref_len,
                                                      shuffle=False,
                                                      cache_limit=data_args.mds_cache_limit,
+                                                     epoch_size=data_args.max_eval_samples # TODO (Dan) check this is working
                                                      )
 
             # TODO (Dan) figure out how select particular number of eval samples with MDS
@@ -340,7 +343,7 @@ def main():
             # metadata_path=data_args.eval_metadata_path,
             metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/dev_local.tsv",
             prompt_tokenizer=prompt_tokenizer,
-            audio_sr=16000, # TODO (Dan) remove these three lines of hard-coding
+            audio_sr=16000, # TODO (Dan) remove all this hard-coding
             audio_ref_len=2,
             num_codebooks=9,
             audio_encoder_bos_token_id=audio_encoder_bos_token_id,
@@ -365,10 +368,8 @@ def main():
                                                          audio_ref_len=model_args.audio_ref_len,
                                                          shuffle=False,
                                                          cache_limit=data_args.mds_cache_limit,
-                                                         epoch=data_args.max_generate_samples
+                                                         epoch_size=data_args.max_generate_samples # TODO (Dan) check this is working
                                                          )
-
-            # TODO (Dan) figure out how select particular number of predict samples with MDS
 
 
     # 6. Next, we can prepare the training.
@@ -387,13 +388,17 @@ def main():
                         device="cpu"
                         ):
         results = {}
-        input_ids = descriptions
-        texts = description_tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+        
+        # check if descriptions are tokenized (this is the case with text-description-to-speech)
+        if isinstance(descriptions[0], int):
+            texts = description_tokenizer.batch_decode(descriptions, skip_special_tokens=True)
+        else:
+            texts = descriptions
         prompts = prompt_tokenizer.batch_decode(prompts, skip_special_tokens=True)
         audios = [a.cpu().numpy() for a in audios]
         
-        clap_score = clap_similarity(clap_model_name_or_path, texts, audios, device)
-        results["clap"] = clap_score
+        # clap_score = clap_similarity(clap_model_name_or_path, texts, audios, device) # TODO temporarily removed
+        # results["clap"] = clap_score
 
         word_error, transcriptions = wer(asr_model_name_or_path,
                                          prompts,
@@ -602,9 +607,11 @@ def main():
 
         with accelerator.autocast(autocast_handler=autocast_kwargs):
             if training_args.parallel_mode.value != "distributed": # TODO check we're supporting this properly
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+                with torch.no_grad():
+                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
             else:
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+                with torch.no_grad():
+                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
             batch["encoder_outputs"] = encoder_outputs
             # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
 
@@ -618,9 +625,11 @@ def main():
     def generate_step(batch):
         with accelerator.autocast(autocast_handler=autocast_kwargs):
             if training_args.parallel_mode.value != "distributed": # TODO check we're supporting this properly
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+                with torch.no_grad():
+                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
             else:
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+                with torch.no_grad():
+                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
             batch["encoder_outputs"] = encoder_outputs
             # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
 
@@ -642,6 +651,7 @@ def main():
         # TODO (Dan) fix sampler if needed
         # if training_args.group_by_length:
         #     sampler = LengthGroupedSampler(train_batch_size, lengths=vectorized_datasets["train"]["target_length"])
+        # TODO (Dan) move this DataLoader creation out of the epoch loop
         if data_args.use_mds:
             train_dataloader = DataLoader(
                 vectorized_datasets["train"],
@@ -723,7 +733,7 @@ def main():
                                 blocking=False,
                             )
 
-                if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1):
+                if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps): # or cur_step == 1):
                     # TODO (Dan) I added this condition to evaluate at the first step, might not want it after debugging
                     train_time += time.time() - train_start
                     # ======================== Evaluating ==============================
@@ -736,12 +746,13 @@ def main():
                     # release training input batch
                     batch = release_memory(batch)
 
+                    # TODO (Dan) move this DataLoader creation out of the epoch loop
                     validation_dataloader = DataLoader(
                         vectorized_datasets["eval"],
                         collate_fn=data_collator,
                         batch_size=per_device_eval_batch_size,
-                        drop_last=False,
-                        num_workers=training_args.dataloader_pin_memory,
+                        drop_last=True,
+                        num_workers=training_args.dataloader_num_workers,
                         pin_memory=training_args.dataloader_pin_memory,
                     )
                     validation_dataloader = accelerator.prepare(validation_dataloader)
@@ -759,9 +770,19 @@ def main():
 
                     if training_args.predict_with_generate:
 
+                        generate_dataloader = DataLoader(
+                            vectorized_datasets["generate"],
+                            collate_fn=data_collator,
+                            batch_size=per_device_eval_batch_size,
+                            drop_last=True,
+                            num_workers=training_args.dataloader_num_workers,
+                            pin_memory=training_args.dataloader_pin_memory,
+                        )
+                        generate_dataloader = accelerator.prepare(generate_dataloader)
+
                         # generation
                         for batch in tqdm(
-                            validation_dataloader,
+                            generate_dataloader,
                             desc=f"Evaluating - Generation ...",
                             position=2,
                             disable=not accelerator.is_local_main_process,
@@ -798,7 +819,7 @@ def main():
                             eval_prompts,
                             model_args.asr_model_name_or_path,
                             model_args.clap_model_name_or_path,
-                            model_args.per_device_eval_batch_size,
+                            per_device_eval_batch_size,
                             description_tokenizer,
                             prompt_tokenizer,
                             sample_rate,
