@@ -57,12 +57,10 @@ from parler_tts import (
     ParlerTTSConfig,
 )
 
-# from parler_tts.audio_conditioning import AudioConditionEncoder
-
 from training.utils import get_last_checkpoint, rotate_checkpoints, log_pred, log_metric
 from training.arguments import ModelArguments, DataTrainingArguments, ParlerTTSTrainingArguments
 from training.data_local import DatasetLocal, DataCollator
-from training.data_mds import DatasetMDS, gather_streams
+from training.data_mds import DatasetMDS, gather_streams, configure_aws_creds
 from training.eval import clap_similarity, wer
 
 
@@ -85,6 +83,10 @@ def main():
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_parler_tts", model_args, data_args)
+
+    if data_args.use_mds:
+        configure_aws_creds()
+
 
     if training_args.dtype == "float16":
         mixed_precision = "fp16"

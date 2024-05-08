@@ -9,6 +9,12 @@ from streaming import Stream
 from transformers import AutoTokenizer
 
 
+def configure_aws_creds():
+    os.environ["S3_ENDPOINT_URL"] = f"https://{os.environ['CF_ACCOUNT_ID']}.r2.cloudflarestorage.com"
+    os.environ["AWS_ACCESS_KEY_ID"] = os.environ["CF_AWS_ACCESS_KEY_ID"]
+    os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ["CF_AWS_SECRET_ACCESS_KEY"]
+
+
 def gather_streams(manifest_path: str,
                    s3_bucket_root: str,
                    mds_cache_dir: str):
@@ -33,6 +39,7 @@ def gather_streams(manifest_path: str,
     streams = [Stream(remote=bucket, local=mds_cache_dir /f"{bucket.split('/')[-1]}") for bucket in buckets]
 
     return streams
+
 
 class DatasetMDS(StreamingDataset):
     def __init__(self,
