@@ -359,7 +359,7 @@ def main():
                                      data_args.mds_s3_bucket_root,
                                      data_args.mds_cache_dir)
             vectorized_datasets["generate"] = DatasetMDS(streams=streams,
-                                                         batch_size=training_args.per_device_generate_batch_size,
+                                                         batch_size=training_args.per_device_eval_batch_size,
                                                          prompt_tokenizer=prompt_tokenizer,
                                                          audio_sample_rate=model_args.audio_ref_encoder_sr,
                                                          audio_ref_len=model_args.audio_ref_len,
@@ -411,6 +411,7 @@ def main():
     train_batch_size = per_device_train_batch_size * accelerator.num_processes
     gradient_accumulation_steps = int(training_args.gradient_accumulation_steps)
     per_device_eval_batch_size = int(training_args.per_device_eval_batch_size)
+
 
     if training_args.max_steps < 0:
         num_epochs = int(training_args.num_train_epochs)
