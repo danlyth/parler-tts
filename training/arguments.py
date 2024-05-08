@@ -73,6 +73,22 @@ class ModelArguments:
         default="laion/larger_clap_music_and_speech",
         metadata={"help": "Used to compute audio similarity during evaluation. Path to pretrained model or model identifier from huggingface.co/models"}
     )
+    audio_ref_encoder_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Used for audio reference embeddings for audio conditioning. Path to pretrained model or model identifier from huggingface.co/models"}
+    )
+    audio_ref_encoder_sr: int = field(
+        default=16000,
+        metadata={"help": "Audio sample rate required for audio reference encoder model."}
+    )
+    audio_ref_len: int = field(
+        default=3,
+        metadata={"help": "Audio reference length in seconds."}
+    ) # TODO (Dan), change this to percent of audio duration
+    discrete_audio_feature_sample_rate: int = field(
+        default=44100,
+        metadata={"help": "Sample rate that the discrete feature encoder-decoder (e.g. DAC/Encodec) operates at."}
+    )
 
 
 
@@ -185,6 +201,15 @@ class DataTrainingArguments:
             )
         },
     )
+    max_generate_samples: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Generating audio takes significant time, truncate the number of generation examples to this "
+                "value if set."
+            )
+        },
+    )
     max_duration_in_seconds: float = field(
         default=35.0,
         metadata={
@@ -276,13 +301,41 @@ class DataTrainingArguments:
     save_to_disk: str = field(
         default=None,
         metadata={
-            "help": "If set, will save the dataset to this path if this is an empyt folder. If not empty, will load the datasets from it."
+            "help": "If set, will save the dataset to this path if this is an empty folder. If not empty, will load the datasets from it."
         },
     )
-    temporary_save_to_disk: str = field(default=None, metadata={"help": "Temporarily save audio labels here."})
+    temporary_save_to_disk: str = field(
+        default=None, metadata={"help": "Temporarily save audio labels here."}
+    )
     pad_to_multiple_of: Optional[int] = field(
         default=2,
         metadata={"help": ("Pad to multiple of for tokenizers.")},
+    )
+    use_mds: bool = field(
+        default=False,
+        metadata={"help": "Whether to use Mosaic Data Shards for training."},
+    )
+    mds_s3_bucket_root: str = field(
+        default=None, metadata={"help": "The root of the MDS S3 bucket."}
+    )
+    mds_cache_dir: str = field(
+        default=None, metadata={"help": "The cache directory for MDS."}
+    )
+    mds_train_manifest_path: str = field(
+        default=None,
+        metadata={"help": "The manifest path for the MDS training bucket names."}
+    )
+    mds_eval_manifest_path: str = field(
+        default=None,
+        metadata={"help": "The manifest path for the MDS evaluation bucket names."}
+    )
+    mds_generate_manifest_path: str = field(
+        default=None,
+        metadata={"help": "The manifest path for the MDS generation (audio sample) bucket names."}
+    )
+    mds_cache_limit: str = field(
+        default="5tb",
+        metadata={"help": "The cache limit for MDS."},
     )
 
 

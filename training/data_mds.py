@@ -1,11 +1,8 @@
 from pathlib import Path
 import io
-from typing import Dict, List, Union, Optional
-from dataclasses import dataclass
 
 import numpy as np
 import torch
-from torch.nn.utils.rnn import pad_sequence
 import torchaudio
 from streaming import StreamingDataset
 from streaming import Stream
@@ -32,41 +29,32 @@ def gather_streams(manifest_path: str,
     buckets = [str(s3_bucket_root + dataset_name) for dataset_name in dataset_names]
     assert len(buckets) > 0, "No datasets found in manifest."
 
-    # Should now have e.g. ["s3://sesame-ml-datasets/libriheavy-small-3min-mds", "s3://sesame-ml-datasets/libriheavy-medium-3min-mds", etc.]
+    # Should now have e.g. ["s3://my-data-bucket/mls_eng_train_dac", "s3://my-data-bucket/mls_eng_dev_dac", etc.]
     streams = [Stream(remote=bucket, local=mds_cache_dir /f"{bucket.split('/')[-1]}") for bucket in buckets]
 
     return streams
 
-class MDSSpeechDataset(StreamingDataset):
+class DatasetMDS(StreamingDataset):
     def __init__(self,
-                 streams: list, # list of Stream objects
-                 batch_size: int,
+                 streams: list, 
+                 batch_size: int, 
                  prompt_tokenizer: AutoTokenizer,
                  audio_sample_rate: int,
                  audio_ref_len: int,
                  **kwargs):
-        super().__init__(streams=streams,
-                         batch_size=batch_size,
-                         download_retry=kwargs['retry'],
-                         shuffle=kwargs['shuffle'],
-                         download_timeout=kwargs['timeout'],
-                         cache_limit=kwargs['cache_limit'], # NOTE this isn't working for some reason...
+        super().__init__(streams=streams, # list of Stream objects
+                         batch_size=batch_size, # necessary for deterministic resumption and optimal performance
+                        #  download_retry=kwargs["retry"], # Default is 2
+                        #  download_timeout=kwargs["timeout"], # Default is 60
+                         shuffle=kwargs["shuffle"], # Default is False
+                         cache_limit=kwargs["cache_limit"], # NOTE this isn't working for some reason...
+                         # See https://docs.mosaicml.com/projects/streaming/en/stable/api_reference/generated/streaming.StreamingDataset.html
+                        #  for full list of available arguments
                          )
-        # self.shuffle = kwargs['shuffle'] # bool
-        # self.prefetch = kwargs['prefetch'] # int, number of samples to prefetch
-        # self.retry = kwargs['retry'] # int, number of retries for each sample
-        # self.timeout = kwargs['timeout'] # int, timeout for each sample
-        # self.batch_size = kwargs['batch_size'] # int
-        # self.num_workers = num_workers # TODO, probably don't keep but might be useful for downloading
-        self.sample_rate = kwargs['sample_rate']
+        
         self.audio_sr = audio_sample_rate
         self.audio_ref_len = audio_ref_len
         self.prompt_tokenizer = prompt_tokenizer
-
-        # self.channels = kwargs['channels']
-        # self.segment_duration = kwargs['segment_duration']
-        # self.total_frames = self.segment_duration * self.sample_rate
-        # self.seek_time = 0.0
 
        
     def __len__(self):
@@ -79,11 +67,8 @@ class MDSSpeechDataset(StreamingDataset):
         # 'dac', 'flac', 'length_ms', 'n_words', 'transcript', 'whisper_average_logprob',
         # 'whisper_max_logprob', 'whisper_min_logprob', 'whisper_sum_logprob'
         
-
-        # flac file is stored as bytes, load appropriately
+        # Load audio (for reference embeddings)
         audio, sr = torchaudio.load(io.BytesIO(data["flac"]), format="flac")
-        # audio = data["flac"] # what sample rate?
-        # sr = 16000 # TODO CHECK
         assert audio.size(0) == 1, f"Audio must be mono, but got {audio.size(0)} channels"
         
         if sr != self.audio_sr:
@@ -125,84 +110,3 @@ class MDSSpeechDataset(StreamingDataset):
                     } 
 
         return features
-
-@dataclass
-class DataCollator:
-    """
-    Data collator that will dynamically pad the inputs received.
-    Args:
-        prompt_tokenizer (:class:`~transformers.AutoTokenizer`)
-            The prompt_tokenizer used for proccessing the data.
-        padding (:obj:`bool`, :obj:`str` or :class:`~transformers.tokenization_utils_base.PaddingStrategy`, `optional`, defaults to :obj:`True`):
-            Select a strategy to pad the returned sequences (according to the model's padding side and padding index)
-            among:
-            * :obj:`True` or :obj:`'longest'`: Pad to the longest sequence in the batch (or no padding if only a single
-              sequence if provided).
-            * :obj:`'max_length'`: Pad to a maximum length specified with the argument :obj:`max_length` or to the
-              maximum acceptable input length for the model if that argument is not provided.
-            * :obj:`False` or :obj:`'do_not_pad'` (default): No padding (i.e., can output a batch with sequences of
-              different lengths).
-        pad_to_multiple_of (:obj:`int`, `optional`):
-            If set will pad the sequence to a multiple of the provided value.
-            This is especially useful to enable the use of Tensor Cores on NVIDIA hardware with compute capability >=
-            7.5 (Volta).
-    """
-
-    prompt_tokenizer: AutoTokenizer
-    padding: Union[bool, str] = "longest"
-    pad_to_multiple_of: Optional[int] = None
-    prompt_max_length: Optional[int] = None
-    audio_max_length: Optional[int] = None
-
-    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-        # split inputs and labels since they have to be of different lengths and need different padding methods
-        
-        # labels: DAC codes
-        # prompt_input_ids: tokenized transcription
-        # prompt_attention_mask: attention mask for tokenized transcription
-        # audio_ref: reference audio segment (fixed length)
-        # audio_ref_attention_mask: attention mask for reference audio segment
-        # decoder_attention_mask: Optional attention mask for DAC codes if audio_max_length is not None and padding is "max_length"
-
-        # Unlike default Parler-TTS we don't have "input_ids" (which they use for descriptions)
-
-        # Transposing DAC codes so that we have (bsz, seq_len, num_codebooks)
-        labels = [feature["labels"].transpose(0, 1) for feature in features]
-        labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100) # TODO remove this hardcoded value
-        if self.audio_max_length is not None and self.padding == "max_length":
-            labels = torch.nn.functional.pad(labels, pad=(0, 0, 0, max(self.audio_max_length - labels.shape[1], 0)))
-
-        batch = {"labels": labels}
-
-        # # TODO, need these variables - Don't think we do actually
-        # output["len_audio"] = len_audio
-        # # (1, bsz, codebooks, seq_len) -> (bsz, seq_len, codebooks)
-        # output["labels"] = labels.squeeze(0).transpose(1, 2)
-        # output["ratio"] = torch.ones_like(len_audio) * labels.shape[-1] / len_audio.max()
-
-        prompt_input_ids = [{"input_ids": feature["prompt_input_ids"]} for feature in features]
-        prompt_input_ids = self.prompt_tokenizer.pad(
-            prompt_input_ids,
-            return_tensors="pt",
-            padding=self.padding,
-            pad_to_multiple_of=self.pad_to_multiple_of,
-            max_length=self.prompt_max_length,
-        )
-
-        batch["prompt_input_ids"] = prompt_input_ids["input_ids"]
-        if "attention_mask" in prompt_input_ids:
-            batch["prompt_attention_mask"] = prompt_input_ids["attention_mask"]
-
-        if self.audio_max_length is not None and self.padding == "max_length":
-            # if we do torch.compile, we need to also specify the attention_mask
-            # decoder_attention_mask = torch.ones(labels.shape[:2], dtype=input_ids["attention_mask"].dtype)
-            decoder_attention_mask = torch.ones(labels.shape[:2], dtype=prompt_input_ids["attention_mask"].dtype)
-            batch["decoder_attention_mask"] = decoder_attention_mask
-
-        # These have a fixed length, no need to pad
-        batch["audio_ref"] = torch.stack([feature["audio_ref"] for feature in features])
-        # However, we would like an attention mask for the audio refs to help with compatibility with the model
-        audio_ref_attention_mask = torch.ones((len(batch["audio_ref"]), batch["audio_ref"][0].shape[0]), dtype=torch.long)
-        batch["audio_ref_attention_mask"] = audio_ref_attention_mask
-
-        return batch

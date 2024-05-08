@@ -40,7 +40,6 @@ from datasets import DatasetDict, IterableDataset
 from huggingface_hub import Repository, create_repo
 import transformers
 from transformers import (
-    AutoFeatureExtractor,
     AutoTokenizer,
     HfArgumentParser,
     AutoModel,
@@ -56,7 +55,6 @@ from accelerate.utils.memory import release_memory
 from parler_tts import (
     ParlerTTSForConditionalGeneration,
     ParlerTTSConfig,
-    build_delay_pattern_mask,
 )
 
 # from parler_tts.audio_conditioning import AudioConditionEncoder
@@ -64,6 +62,7 @@ from parler_tts import (
 from training.utils import get_last_checkpoint, rotate_checkpoints, log_pred, log_metric
 from training.arguments import ModelArguments, DataTrainingArguments, ParlerTTSTrainingArguments
 from training.data_local import DatasetLocal, DataCollator
+from training.data_mds import DatasetMDS, gather_streams
 from training.eval import clap_similarity, wer
 
 
@@ -105,6 +104,21 @@ def main():
 
     padding = "max_length" if data_args.pad_to_max_length else "longest"
 
+    # Detecting last checkpoint and eventually continue from last checkpoint
+    last_checkpoint = None
+    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+        last_checkpoint = get_last_checkpoint(training_args.output_dir)
+        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+            raise ValueError(
+                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+                "Use --overwrite_output_dir to overcome."
+            )
+        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+            logger.info(
+                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
+                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
+            )
+
     # Accelerator preparation
     kwargs_handlers = [InitProcessGroupKwargs(timeout=timedelta(minutes=60))]
     if training_args.torch_compile:
@@ -140,20 +154,7 @@ def main():
         },
     )
 
-    # Detecting last checkpoint and eventually continue from last checkpoint
-    last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-            )
+    
 
     # Setup logging
     logging.basicConfig(
@@ -187,14 +188,7 @@ def main():
     # Note for distributed training, the .from_pretrained methods guarantee that only
     # one local process can concurrently download model & vocab.
 
-    # load feature extractor
-    feature_extractor = AutoFeatureExtractor.from_pretrained(
-        model_args.feature_extractor_name or model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        token=data_args.token,
-        trust_remote_code=data_args.trust_remote_code,
-    )
-    sampling_rate = feature_extractor.sampling_rate
+    sample_rate = model_args.discrete_audio_feature_sample_rate # TODO (Dan) need to get this from somewhere else as I won't be using the feature extractor
 
     # load prompt tokenizer
     prompt_tokenizer = AutoTokenizer.from_pretrained(
@@ -223,8 +217,7 @@ def main():
         description_tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
     # load audio reference encoder
-    # audio_ref_encoder = AudioConditionEncoder("microsoft/wavlm-base-plus")
-    audio_ref_encoder = AutoModel.from_pretrained("microsoft/wavlm-base-plus") # TODO (Dan) remove this hard-coding
+    audio_ref_encoder = AutoModel.from_pretrained(model_args.audio_ref_encoder_name)
     audio_ref_encoder.to(training_args.device)
 
 
@@ -261,15 +254,11 @@ def main():
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
-
-    # derive max & min input length for sample rate & max duration
-    sampling_rate = feature_extractor.sampling_rate # TODO (Dan) move this to wer function and get it from model.audio_encoder
-
     # Freeze Encoders
     model.freeze_encoders(model_args.freeze_text_encoder)
 
     audio_max_length = None
-    if training_args.torch_compile:
+    if training_args.torch_compile: # TODO (Dan) check this works
         audio_max_length = max(vectorized_datasets["train"]["target_length"])
         with accelerator.main_process_first():
             max_sample = vectorized_datasets["train"].filter(
@@ -287,71 +276,129 @@ def main():
 
     # TODO (Dan) remove all this hard-coding
     if training_args.do_train:
-        vectorized_datasets["train"] = DatasetLocal(
-        # root_audio_dir=data_args.root_audio_dir,
-        root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
-        # root_dac_dir=data_args.root_dac_dir,
-        root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
-        # metadata_path=data_args.train_metadata_path,
-        metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/train_local.tsv",
-        prompt_tokenizer=prompt_tokenizer,
-        audio_sr=16000, # TODO (Dan) remove these three lines of hard-coding
-        audio_ref_len=2,
-        num_codebooks=9,
-        audio_encoder_bos_token_id=audio_encoder_bos_token_id,
-        audio_encoder_eos_token_id=audio_encoder_eos_token_id,
-    )
 
-        # TODO (Dan) check this works
-        if data_args.max_train_samples is not None:
-            indices = random.sample(range(len(vectorized_datasets["train"])), data_args.max_train_samples)
-            vectorized_datasets["train"] = Subset(vectorized_datasets["train"], indices)
-            # vectorized_datasets["train"] = vectorized_datasets["train"].select(range(data_args.max_train_samples))
+        if data_args.use_mds:
+            streams = gather_streams(data_args.mds_train_manifest_path,
+                                     data_args.mds_s3_bucket_root,
+                                     data_args.mds_cache_dir)
+            vectorized_datasets["train"] = DatasetMDS(streams=streams,
+                                                      batch_size=training_args.per_device_train_batch_size,
+                                                      prompt_tokenizer=prompt_tokenizer,
+                                                      audio_sample_rate=model_args.audio_ref_encoder_sr,
+                                                      audio_ref_len=model_args.audio_ref_len,
+                                                      shuffle=True,
+                                                      cache_limit=data_args.mds_cache_limit,
+                                                      )
+
+        else:
+            vectorized_datasets["train"] = DatasetLocal(
+            # root_audio_dir=data_args.root_audio_dir,
+            root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
+            # root_dac_dir=data_args.root_dac_dir,
+            root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
+            # metadata_path=data_args.train_metadata_path,
+            metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/train_local.tsv",
+            prompt_tokenizer=prompt_tokenizer,
+            audio_sr=16000, # TODO (Dan) remove these three lines of hard-coding
+            audio_ref_len=2,
+            num_codebooks=9,
+            audio_encoder_bos_token_id=audio_encoder_bos_token_id,
+            audio_encoder_eos_token_id=audio_encoder_eos_token_id,
+        )
+
+            # TODO (Dan) check this works
+            if data_args.max_train_samples is not None:
+                indices = random.sample(range(len(vectorized_datasets["train"])), data_args.max_train_samples)
+                vectorized_datasets["train"] = Subset(vectorized_datasets["train"], indices)
+                # vectorized_datasets["train"] = vectorized_datasets["train"].select(range(data_args.max_train_samples))
 
     if training_args.do_eval:
-        vectorized_datasets["eval"] = DatasetLocal(
-        # root_audio_dir=data_args.root_audio_dir,
-        root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
-        # root_dac_dir=data_args.root_dac_dir,
-        root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
-        # metadata_path=data_args.eval_metadata_path,
-        metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/dev_local.tsv",
-        prompt_tokenizer=prompt_tokenizer,
-        audio_sr=16000, # TODO (Dan) remove these three lines of hard-coding
-        audio_ref_len=2,
-        num_codebooks=9,
-        audio_encoder_bos_token_id=audio_encoder_bos_token_id,
-        audio_encoder_eos_token_id=audio_encoder_eos_token_id,
+
+        if data_args.use_mds:
+            streams = gather_streams(data_args.mds_eval_manifest_path,
+                                     data_args.mds_s3_bucket_root,
+                                     data_args.mds_cache_dir)
+            vectorized_datasets["eval"] = DatasetMDS(streams=streams,
+                                                     batch_size=training_args.per_device_eval_batch_size,
+                                                     prompt_tokenizer=prompt_tokenizer,
+                                                     audio_sample_rate=model_args.audio_ref_encoder_sr,
+                                                     audio_ref_len=model_args.audio_ref_len,
+                                                     shuffle=False,
+                                                     cache_limit=data_args.mds_cache_limit,
+                                                     )
+
+            # TODO (Dan) figure out how select particular number of eval samples with MDS
+
+        else:
+            vectorized_datasets["eval"] = DatasetLocal(
+            # root_audio_dir=data_args.root_audio_dir,
+            root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
+            # root_dac_dir=data_args.root_dac_dir,
+            root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
+            # metadata_path=data_args.eval_metadata_path,
+            metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/dev_local.tsv",
+            prompt_tokenizer=prompt_tokenizer,
+            audio_sr=16000, # TODO (Dan) remove these three lines of hard-coding
+            audio_ref_len=2,
+            num_codebooks=9,
+            audio_encoder_bos_token_id=audio_encoder_bos_token_id,
+            audio_encoder_eos_token_id=audio_encoder_eos_token_id,
     )
 
-        # TODO (Dan) check this works
-        if data_args.max_eval_samples is not None:
-            indices = random.sample(range(len(vectorized_datasets["eval"])), data_args.max_eval_samples)
-            vectorized_datasets["eval"] = Subset(vectorized_datasets["eval"], indices)
+            # TODO (Dan) check this works
+            if data_args.max_eval_samples is not None:
+                indices = random.sample(range(len(vectorized_datasets["eval"])), data_args.max_eval_samples)
+                vectorized_datasets["eval"] = Subset(vectorized_datasets["eval"], indices)
+
+    if training_args.predict_with_generate:
+
+        if data_args.use_mds:
+            streams = gather_streams(data_args.mds_generate_manifest_path,
+                                     data_args.mds_s3_bucket_root,
+                                     data_args.mds_cache_dir)
+            vectorized_datasets["generate"] = DatasetMDS(streams=streams,
+                                                         batch_size=training_args.per_device_predict_batch_size,
+                                                         prompt_tokenizer=prompt_tokenizer,
+                                                         audio_sample_rate=model_args.audio_ref_encoder_sr,
+                                                         audio_ref_len=model_args.audio_ref_len,
+                                                         shuffle=False,
+                                                         cache_limit=data_args.mds_cache_limit,
+                                                         epoch=data_args.max_generate_samples
+                                                         )
+
+            # TODO (Dan) figure out how select particular number of predict samples with MDS
 
 
     # 6. Next, we can prepare the training.
 
     # Let's use word CLAP similary and WER metrics as our evaluation metrics
-    def compute_metrics(audios, descriptions, prompts, device="cpu"):
+    # TODO (Dan) Move this to eval
+    def compute_metrics(audios,
+                        descriptions,
+                        prompts,
+                        asr_model_name_or_path,
+                        clap_model_name_or_path,
+                        batch_size,
+                        description_tokenizer,
+                        prompt_tokenizer,
+                        sample_rate,
+                        device="cpu"
+                        ):
         results = {}
+        input_ids = descriptions
+        texts = description_tokenizer.batch_decode(input_ids, skip_special_tokens=True)
         prompts = prompt_tokenizer.batch_decode(prompts, skip_special_tokens=True)
         audios = [a.cpu().numpy() for a in audios]
+        
+        clap_score = clap_similarity(clap_model_name_or_path, texts, audios, device)
+        results["clap"] = clap_score
 
-        if descriptions is not None:
-            input_ids = descriptions
-            texts = description_tokenizer.batch_decode(input_ids, skip_special_tokens=True)
-            clap_score = clap_similarity(model_args.clap_model_name_or_path, texts, audios, device)
-            results["clap"] = clap_score
-        else:
-            results["clap"] = 0.0
-            texts = "No descriptions provided"
-        word_error, transcriptions = wer(model_args.asr_model_name_or_path,
-                                        prompts,
-                                        audios,
-                                        device,
-                                        training_args.per_device_eval_batch_size,
-                                        sampling_rate)
+        word_error, transcriptions = wer(asr_model_name_or_path,
+                                         prompts,
+                                         audios,
+                                         device,
+                                         batch_size,
+                                         sample_rate)
         results["wer"] = word_error
 
         return results, texts, prompts, audios, transcriptions
@@ -401,7 +448,7 @@ def main():
     )
 
     # Instantiate custom data collator
-    # TODO decide on whether we want description conditioning
+    # TODO (Dan) decide on whether we want description conditioning
     data_collator = DataCollator(
         prompt_tokenizer=prompt_tokenizer,
         # description_tokenizer=description_tokenizer,
@@ -476,7 +523,7 @@ def main():
                 )
                 prompt_tokenizer.save_pretrained(training_args.output_dir)
 
-            feature_extractor.save_pretrained(training_args.output_dir)
+            # feature_extractor.save_pretrained(training_args.output_dir)
             config.save_pretrained(training_args.output_dir)
 
     if checkpoint is not None:
@@ -524,33 +571,15 @@ def main():
     ):
         model.train()
 
-        audio_conditioning = True # TODO (Dan) temp, replace with arg
-
-        if audio_conditioning:
-            with accelerator.autocast(autocast_handler=autocast_kwargs):
-                if training_args.parallel_mode.value != "distributed": # TODO (Dan) check we're supporting this properly
-                    with torch.no_grad(): # Does autocast take care of this?
-                        encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-                else:
-                    with torch.no_grad(): # Does autocast take care of this?
-                        encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-                batch["encoder_outputs"] = encoder_outputs # Size (batch_size, audio_ref length / downsampling, hidden_size)
-                # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"]) # Can do this because we're not using padding
-
-        else:
-            # Natural language conditioning
-            if mixed_precision == "fp16":
-                # fp16 doesn't work with T5-like models
-                with accelerator.autocast(autocast_handler=autocast_kwargs):
-                    if training_args.parallel_mode.value != "distributed":
-                        encoder_outputs = model.text_encoder(
-                            input_ids=batch.get("input_ids"), attention_mask=batch.get("attention_mask", None)
-                        )
-                    else:
-                        encoder_outputs = model.module.text_encoder(
-                            input_ids=batch.get("input_ids"), attention_mask=batch.get("attention_mask", None)
-                        )
-                    batch["encoder_outputs"] = encoder_outputs # Size (batch_size, token length, hidden_size)
+        with accelerator.autocast(autocast_handler=autocast_kwargs):
+            if training_args.parallel_mode.value != "distributed": # TODO (Dan) check we're supporting this properly
+                with torch.no_grad(): # Does autocast take care of this?
+                    encoder_outputs = audio_ref_encoder(batch["audio_ref"]) # TODO move this to dataset?
+            else:
+                with torch.no_grad(): # Does autocast take care of this?
+                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            batch["encoder_outputs"] = encoder_outputs # Size (batch_size, audio_ref length / downsampling, hidden_size)
+            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"]) # Can do this because we're not using padding
 
         outputs = model(**batch)
         # CE (data) loss
@@ -567,32 +596,14 @@ def main():
     ):
         eval_model = model if not training_args.torch_compile else model._orig_mod
         eval_model.eval()
-        audio_conditioning = True # TODO temp, replace with arg
 
-        if audio_conditioning:
-            with accelerator.autocast(autocast_handler=autocast_kwargs):
-                if training_args.parallel_mode.value != "distributed": # TODO check we're supporting this properly
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-                else:
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-                batch["encoder_outputs"] = encoder_outputs
-                # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
-
-        else:
-            # Natural language conditioning
-            if mixed_precision == "fp16":
-                # fp16 doesn't work with T5-like models
-                with accelerator.autocast(autocast_handler=autocast_kwargs):
-                    with torch.no_grad():
-                        if training_args.parallel_mode.value != "distributed" or training_args.torch_compile:
-                            encoder_outputs = eval_model.text_encoder(
-                                input_ids=batch.get("input_ids"), attention_mask=batch.get("attention_mask", None)
-                            )
-                        else:
-                            encoder_outputs = eval_model.module.text_encoder(
-                                input_ids=batch.get("input_ids"), attention_mask=batch.get("attention_mask", None)
-                            )
-                    batch["encoder_outputs"] = encoder_outputs
+        with accelerator.autocast(autocast_handler=autocast_kwargs):
+            if training_args.parallel_mode.value != "distributed": # TODO check we're supporting this properly
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            else:
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            batch["encoder_outputs"] = encoder_outputs
+            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
 
         with torch.no_grad():
             outputs = eval_model(**batch)
@@ -602,18 +613,16 @@ def main():
         return metrics
 
     def generate_step(batch):
-        audio_conditioning = True # TODO temp, replace with arg
-        if audio_conditioning:
-            with accelerator.autocast(autocast_handler=autocast_kwargs):
-                if training_args.parallel_mode.value != "distributed": # TODO check we're supporting this properly
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-                else:
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-                batch["encoder_outputs"] = encoder_outputs
-                # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
+        with accelerator.autocast(autocast_handler=autocast_kwargs):
+            if training_args.parallel_mode.value != "distributed": # TODO check we're supporting this properly
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            else:
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            batch["encoder_outputs"] = encoder_outputs
+            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
 
-            batch.pop("audio_ref", None)
-            batch.pop("audio_ref_attention_mask", None)
+        batch.pop("audio_ref", None)
+        batch.pop("audio_ref_attention_mask", None)
 
 
         batch.pop("decoder_attention_mask", None)
@@ -634,7 +643,7 @@ def main():
             vectorized_datasets["train"],
             collate_fn=data_collator,
             batch_size=per_device_train_batch_size,
-            shuffle=True, # TODO, use seed?
+            shuffle=True, # TODO (Dan) use seed?
             sampler=sampler,
             num_workers=training_args.dataloader_num_workers,
             pin_memory=training_args.dataloader_pin_memory,
@@ -746,14 +755,14 @@ def main():
                             generated_audios = generate_step(batch)
                             # Gather all predictions and targets
                             generated_audios, prompts = accelerator.pad_across_processes(
-                                (generated_audios, batch["prompt_input_ids"]), dim=1, pad_index=0 # TODO Dan, we don't have "input_ids" in the batch
+                                (generated_audios, batch["prompt_input_ids"]), dim=1, pad_index=0
                             )
                             generated_audios, prompts = accelerator.gather_for_metrics(
                                 (generated_audios, prompts)
                             )
                             eval_preds.extend(generated_audios.to("cpu"))
-                            # eval_descriptions.extend(input_ids.to("cpu")) # TODO fix this hard-coding
-                            eval_descriptions.extend("No description")
+                            # eval_descriptions.extend(input_ids.to("cpu")) 
+                            eval_descriptions.extend("No description") # TODO (Dan) fix this hard-coding
                             eval_prompts.extend(prompts.to("cpu"))
 
                     eval_time = time.time() - eval_start
@@ -768,11 +777,20 @@ def main():
                     if training_args.predict_with_generate:
                         # metric_values, pred_descriptions, pred_prompts, audios, transcriptions = compute_metrics(
                         #     eval_preds, eval_descriptions, eval_prompts, accelerator.device
-                        # )
+                        # ) # TODO (Dan), tidy this up
                         metric_values, pred_descriptions, pred_prompts, audios, transcriptions = compute_metrics(
-                            eval_preds, None, eval_prompts, accelerator.device
+                            eval_preds,
+                            eval_descriptions,
+                            eval_prompts,
+                            model_args.asr_model_name_or_path,
+                            model_args.clap_model_name_or_path,
+                            model_args.per_device_eval_batch_size,
+                            description_tokenizer,
+                            prompt_tokenizer,
+                            sample_rate,
+                            accelerator.device
                         )
-                        pred_descriptions = ["No description" for _ in range(len(pred_prompts))]
+                        pred_descriptions = ["No description" for _ in range(len(pred_prompts))] # TODO (Dan) remove this at some point
                         eval_metrics.update(metric_values)
                         metrics_desc = " ".join([f"Eval {key}: {value} |" for key, value in metric_values.items()])
                         if "wandb" in training_args.report_to:
@@ -782,7 +800,7 @@ def main():
                                 pred_prompts,
                                 transcriptions,
                                 audios,
-                                sampling_rate=sampling_rate,
+                                sampling_rate=sample_rate,
                                 step=cur_step,
                                 prefix="eval",
                             )
