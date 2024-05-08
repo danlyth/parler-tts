@@ -642,15 +642,26 @@ def main():
         # TODO (Dan) fix sampler if needed
         # if training_args.group_by_length:
         #     sampler = LengthGroupedSampler(train_batch_size, lengths=vectorized_datasets["train"]["target_length"])
-        train_dataloader = DataLoader(
-            vectorized_datasets["train"],
-            collate_fn=data_collator,
-            batch_size=per_device_train_batch_size,
-            shuffle=True, # TODO (Dan) use seed?
-            sampler=sampler,
-            num_workers=training_args.dataloader_num_workers,
-            pin_memory=training_args.dataloader_pin_memory,
-        )
+        if data_args.use_mds:
+            train_dataloader = DataLoader(
+                vectorized_datasets["train"],
+                collate_fn=data_collator,
+                batch_size=per_device_train_batch_size,
+                # shuffle=True, # TODO (Dan) shuffle doesn't work with IterableDataset, check that we're definitely shuffling
+                sampler=sampler,
+                num_workers=training_args.dataloader_num_workers,
+                pin_memory=training_args.dataloader_pin_memory,
+            )
+        else:
+            train_dataloader = DataLoader(
+                vectorized_datasets["train"],
+                collate_fn=data_collator,
+                batch_size=per_device_train_batch_size,
+                shuffle=True,
+                sampler=sampler,
+                num_workers=training_args.dataloader_num_workers,
+                pin_memory=training_args.dataloader_pin_memory,
+            )
         train_dataloader = accelerator.prepare(train_dataloader)
         if hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDataset):
             train_dataloader.dataset.set_epoch(epoch)
