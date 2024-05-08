@@ -359,7 +359,7 @@ def main():
                                      data_args.mds_s3_bucket_root,
                                      data_args.mds_cache_dir)
             vectorized_datasets["generate"] = DatasetMDS(streams=streams,
-                                                         batch_size=training_args.per_device_predict_batch_size,
+                                                         batch_size=training_args.per_device_generate_batch_size,
                                                          prompt_tokenizer=prompt_tokenizer,
                                                          audio_sample_rate=model_args.audio_ref_encoder_sr,
                                                          audio_ref_len=model_args.audio_ref_len,
