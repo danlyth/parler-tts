@@ -100,11 +100,7 @@ class DatasetMDS(StreamingDataset):
         audio = audio[start:start + self.audio_sr * self.audio_ref_len]
 
         # Load DAC codes
-        # labels = torch.from_numpy(data["dac"])
-        # With the above I'm getting this error, going to try this instead TypeError: can't convert np.ndarray of type numpy.uint16. The only supported types are: float64, float32, float16, complex64, complex128, int64, int32, int16, int8, uint8, and bool.
-        labels = np.frombuffer(data["dac"], dtype=np.uint16)
-        labels = torch.from_numpy(labels.astype(np.int32)).unsqueeze(0) # Adding channel dimension
-
+        labels = torch.from_numpy(data["dac"]).unsqueeze(0)
 
         # Load transcription
         transcription = data["transcript"]
