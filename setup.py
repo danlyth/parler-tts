@@ -35,6 +35,7 @@ _extras_training_deps = [
     "accelerate",
     "evaluate",
     "datasets[audio]>=2.14.5",
+    "mosaicml-streaming",
 ]
 
 here = os.path.abspath(os.path.dirname(__file__))
