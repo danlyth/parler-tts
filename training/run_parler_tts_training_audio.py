@@ -791,6 +791,8 @@ def main():
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metrics.append(eval_metric)
 
+                    num_samples_to_generate = 48 # TODO remove this hard-coding
+                    samples_generated = 0
                     if training_args.predict_with_generate:
                         # release eval input batch (in favour of generate)
                         batch = release_memory(batch)
@@ -813,6 +815,10 @@ def main():
                             # eval_descriptions.extend(input_ids.to("cpu")) 
                             eval_descriptions.extend("No description") # TODO (Dan) fix this hard-coding
                             eval_prompts.extend(prompts.to("cpu"))
+
+                            samples_generated += batch["prompt_input_ids"].shape[0]
+                            if samples_generated >= num_samples_to_generate:
+                                break # TODO fix this hack properly
 
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
