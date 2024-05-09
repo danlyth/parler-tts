@@ -275,6 +275,18 @@ def main():
     audio_encoder_bos_token_id = model.generation_config.decoder_start_token_id
 
     # 2. Now, let's load the dataset # TODO (Dan) change numbering
+    # Instantiate custom data collator
+    data_collator = DataCollator(
+        prompt_tokenizer=prompt_tokenizer,
+        # description_tokenizer=description_tokenizer,
+        pad_to_multiple_of=data_args.pad_to_multiple_of,
+        padding=padding,
+        prompt_max_length=data_args.max_prompt_token_length,
+        # description_max_length=data_args.max_description_token_length,
+        audio_max_length=audio_max_length,
+    )
+
+
     vectorized_datasets = DatasetDict()
 
     # TODO (Dan) remove all this hard-coding
@@ -291,7 +303,7 @@ def main():
                                                       audio_ref_len=model_args.audio_ref_len,
                                                       shuffle=True,
                                                       cache_limit=data_args.mds_cache_limit,
-                                                      epoch_size=data_args.max_train_samples # TODO (Dan) check this is working
+                                                      epoch_size=data_args.max_train_samples
                                                       )
 
         else:
@@ -329,7 +341,7 @@ def main():
                                                      audio_ref_len=model_args.audio_ref_len,
                                                      shuffle=False,
                                                      cache_limit=data_args.mds_cache_limit,
-                                                     epoch_size=data_args.max_eval_samples # TODO (Dan) check this is working
+                                                     epoch_size=data_args.max_eval_samples
                                                      )
 
             # TODO (Dan) figure out how select particular number of eval samples with MDS
@@ -348,12 +360,22 @@ def main():
             num_codebooks=9,
             audio_encoder_bos_token_id=audio_encoder_bos_token_id,
             audio_encoder_eos_token_id=audio_encoder_eos_token_id,
-    )
+            )
 
             # TODO (Dan) check this works
             if data_args.max_eval_samples is not None:
                 indices = random.sample(range(len(vectorized_datasets["eval"])), data_args.max_eval_samples)
                 vectorized_datasets["eval"] = Subset(vectorized_datasets["eval"], indices)
+
+        validation_dataloader = DataLoader(
+            vectorized_datasets["eval"],
+            collate_fn=data_collator,
+            batch_size=training_args.per_device_eval_batch_size,
+            drop_last=True,
+            num_workers=training_args.dataloader_num_workers,
+            pin_memory=training_args.dataloader_pin_memory,
+        )
+        validation_dataloader = accelerator.prepare(validation_dataloader)
 
     if training_args.predict_with_generate:
 
@@ -368,8 +390,33 @@ def main():
                                                          audio_ref_len=model_args.audio_ref_len,
                                                          shuffle=False,
                                                          cache_limit=data_args.mds_cache_limit,
-                                                         epoch_size=data_args.max_generate_samples # TODO (Dan) check this is working
+                                                         epoch_size=data_args.max_generate_samples
                                                          )
+        else:
+            vectorized_datasets["generate"] = DatasetLocal(
+            # root_audio_dir=data_args.root_audio_dir,
+            root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
+            # root_dac_dir=data_args.root_dac_dir,
+            root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
+            # metadata_path=data_args.eval_metadata_path,
+            metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/test_local.tsv",
+            prompt_tokenizer=prompt_tokenizer,
+            audio_sr=16000, # TODO (Dan) remove all this hard-coding
+            audio_ref_len=2,
+            num_codebooks=9,
+            audio_encoder_bos_token_id=audio_encoder_bos_token_id,
+            audio_encoder_eos_token_id=audio_encoder_eos_token_id,
+            )
+
+        generate_dataloader = DataLoader(
+                        vectorized_datasets["generate"],
+                        collate_fn=data_collator,
+                        batch_size=training_args.per_device_eval_batch_size,
+                        drop_last=True,
+                        num_workers=training_args.dataloader_num_workers,
+                        pin_memory=training_args.dataloader_pin_memory,
+                    )
+        generate_dataloader = accelerator.prepare(generate_dataloader)
 
 
     # 6. Next, we can prepare the training.
@@ -453,18 +500,6 @@ def main():
         optimizer=optimizer,
         num_warmup_steps=training_args.get_warmup_steps(total_train_steps) * accelerator.num_processes,
         num_training_steps=total_train_steps * accelerator.num_processes,
-    )
-
-    # Instantiate custom data collator
-    # TODO (Dan) decide on whether we want description conditioning
-    data_collator = DataCollator(
-        prompt_tokenizer=prompt_tokenizer,
-        # description_tokenizer=description_tokenizer,
-        pad_to_multiple_of=data_args.pad_to_multiple_of,
-        padding=padding,
-        prompt_max_length=data_args.max_prompt_token_length,
-        # description_max_length=data_args.max_description_token_length,
-        audio_max_length=audio_max_length,
     )
 
     # Prepare everything with accelerate
@@ -733,7 +768,7 @@ def main():
                                 blocking=False,
                             )
 
-                if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps): # or cur_step == 1):
+                if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1):
                     # TODO (Dan) I added this condition to evaluate at the first step, might not want it after debugging
                     train_time += time.time() - train_start
                     # ======================== Evaluating ==============================
@@ -742,20 +777,8 @@ def main():
                     eval_descriptions = []
                     eval_prompts = []
                     eval_start = time.time()
-
                     # release training input batch
                     batch = release_memory(batch)
-
-                    # TODO (Dan) move this DataLoader creation out of the epoch loop
-                    validation_dataloader = DataLoader(
-                        vectorized_datasets["eval"],
-                        collate_fn=data_collator,
-                        batch_size=per_device_eval_batch_size,
-                        drop_last=True,
-                        num_workers=training_args.dataloader_num_workers,
-                        pin_memory=training_args.dataloader_pin_memory,
-                    )
-                    validation_dataloader = accelerator.prepare(validation_dataloader)
 
                     for batch in tqdm(
                         validation_dataloader,
@@ -769,17 +792,8 @@ def main():
                         eval_metrics.append(eval_metric)
 
                     if training_args.predict_with_generate:
-
-                        generate_dataloader = DataLoader(
-                            vectorized_datasets["generate"],
-                            collate_fn=data_collator,
-                            batch_size=per_device_eval_batch_size,
-                            drop_last=True,
-                            num_workers=training_args.dataloader_num_workers,
-                            pin_memory=training_args.dataloader_pin_memory,
-                        )
-                        generate_dataloader = accelerator.prepare(generate_dataloader)
-
+                        # release eval input batch (in favour of generate)
+                        batch = release_memory(batch)
                         # generation
                         for batch in tqdm(
                             generate_dataloader,

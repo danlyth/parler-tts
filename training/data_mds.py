@@ -61,6 +61,7 @@ class DatasetMDS(StreamingDataset):
                         #  download_timeout=kwargs["timeout"], # Default is 60
                          shuffle=kwargs["shuffle"], # Default is False
                          cache_limit=kwargs["cache_limit"], # NOTE this isn't working for some reason...
+                         epoch_size=kwargs["epoch_size"] # Number of samples to draw per epoch balanced across all streams. Useful for limiting dataset size for debugging or generation
                          # See https://docs.mosaicml.com/projects/streaming/en/stable/api_reference/generated/streaming.StreamingDataset.html
                         #  for full list of available arguments
                          )
@@ -109,7 +110,7 @@ class DatasetMDS(StreamingDataset):
         audio = audio[start:start + self.audio_sr * self.audio_ref_len]
 
         # Load DAC codes and re-arrange into the delay pattern
-        labels = torch.tensor(data["dac"]).long() # Shape (n_codebooks, n_frames)
+        labels = torch.tensor(data["dac"].astype(np.int64))
         labels = labels.unsqueeze(0)
         # add bos
         labels = torch.cat([self.bos_labels, labels], dim=-1)
