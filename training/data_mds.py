@@ -6,12 +6,12 @@ from typing import Optional
 import numpy as np
 import torch
 import torchaudio
-from arguments import DataTrainingArguments, ModelArguments, ParlerTTSTrainingArguments
 from streaming import Stream, StreamingDataset
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from parler_tts.modeling_parler_tts import build_delay_pattern_mask
+from training.arguments import DataTrainingArguments, ModelArguments, ParlerTTSTrainingArguments
 
 
 def configure_aws_creds():
