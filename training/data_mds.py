@@ -1,12 +1,14 @@
-from pathlib import Path
-import os
 import io
+import os
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
 import torchaudio
-from streaming import StreamingDataset
-from streaming import Stream
+from arguments import DataTrainingArguments, ModelArguments, ParlerTTSTrainingArguments
+from streaming import Stream, StreamingDataset
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from parler_tts.modeling_parler_tts import build_delay_pattern_mask
@@ -18,9 +20,7 @@ def configure_aws_creds():
     os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ["CF_AWS_SECRET_ACCESS_KEY"]
 
 
-def gather_streams(manifest_path: str,
-                   s3_bucket_root: str,
-                   mds_cache_dir: str):
+def gather_streams(manifest_path: str, s3_bucket_root: str, mds_cache_dir: str):
     """Instantiate SpeechDataset from a path to a directory containing a manifest as a txt file.
 
     Args:
@@ -39,34 +39,39 @@ def gather_streams(manifest_path: str,
     assert len(buckets) > 0, "No datasets found in manifest."
 
     # Should now have e.g. ["s3://my-data-bucket/mls_eng_train_dac", "s3://my-data-bucket/mls_eng_dev_dac", etc.]
-    streams = [Stream(remote=bucket, local=mds_cache_dir /f"{bucket.split('/')[-1]}") for bucket in buckets]
+    streams = [Stream(remote=bucket, local=mds_cache_dir / f"{bucket.split('/')[-1]}") for bucket in buckets]
 
     return streams
 
 
 class DatasetMDS(StreamingDataset):
-    def __init__(self,
-                 streams: list, 
-                 batch_size: int, 
-                 prompt_tokenizer: AutoTokenizer,
-                 audio_sample_rate:int, # audio sample rate for reference encoder, typically 16kHz
-                 audio_ref_len:int, # audio reference length (in seconds) for reference encoder
-                 num_codebooks:int=9, # number of codebooks in the DAC features
-                 audio_encoder_bos_token_id:int=1025, # BOS token id for audio encoder
-                 audio_encoder_eos_token_id:int=1024, # EOS token id for audio encoder
-                 **kwargs):
-        super().__init__(streams=streams, # list of Stream objects
-                         batch_size=batch_size, # necessary for deterministic resumption and optimal performance
-                        #  download_retry=kwargs["retry"], # Default is 2
-                        #  download_timeout=kwargs["timeout"], # Default is 60
-                         shuffle=kwargs["shuffle"], # Default is False
-                         cache_limit=kwargs["cache_limit"], # NOTE this isn't working for some reason...
-                         epoch_size=kwargs["epoch_size"] # Number of samples to draw per epoch balanced across all streams. Useful for limiting dataset size for debugging or generation
-                         # See https://docs.mosaicml.com/projects/streaming/en/stable/api_reference/generated/streaming.StreamingDataset.html
-                        #  for full list of available arguments
-                         )
-        
-        self.audio_sr = audio_sample_rate
+    def __init__(
+        self,
+        streams: list,
+        batch_size: int,
+        prompt_tokenizer: AutoTokenizer,
+        audio_ref_sample_rate: int,  # audio sample rate for reference encoder, typically 16kHz
+        audio_ref_len: int,  # audio reference length (in seconds) for reference encoder
+        num_codebooks: int,  # number of codebooks in the DAC features
+        audio_encoder_bos_token_id: int = 1025,  # BOS token id for audio encoder
+        audio_encoder_eos_token_id: int = 1024,  # EOS token id for audio encoder
+        **kwargs,
+    ):
+        super().__init__(
+            streams=streams,  # list of Stream objects
+            batch_size=batch_size,  # necessary for deterministic resumption and optimal performance
+            #  download_retry=kwargs["retry"], # Default is 2
+            #  download_timeout=kwargs["timeout"], # Default is 60
+            shuffle=kwargs["shuffle"],  # Default is False
+            cache_limit=kwargs["cache_limit"],  # NOTE this isn't working for some reason...
+            epoch_size=kwargs[
+                "epoch_size"
+            ],  # Number of samples to draw per epoch balanced across all streams. Useful for limiting dataset size for debugging or generation
+            # See https://docs.mosaicml.com/projects/streaming/en/stable/api_reference/generated/streaming.StreamingDataset.html
+            #  for full list of available arguments
+        )
+
+        self.audio_sr = audio_ref_sample_rate
         self.audio_ref_len = audio_ref_len
         self.prompt_tokenizer = prompt_tokenizer
         self.num_codebooks = num_codebooks
@@ -74,7 +79,6 @@ class DatasetMDS(StreamingDataset):
         self.audio_encoder_eos_token_id = audio_encoder_eos_token_id
         self.bos_labels = torch.ones((1, num_codebooks, 1)) * audio_encoder_bos_token_id
 
-       
     def __len__(self):
         return super().__len__()
 
@@ -84,11 +88,11 @@ class DatasetMDS(StreamingDataset):
         # Available keys in data:
         # 'dac', 'flac', 'length_ms', 'n_words', 'transcript', 'whisper_average_logprob',
         # 'whisper_max_logprob', 'whisper_min_logprob', 'whisper_sum_logprob'
-        
+
         # Load audio (for reference embeddings)
         audio, sr = torchaudio.load(io.BytesIO(data["flac"]), format="flac")
         assert audio.size(0) == 1, f"Audio must be mono, but got {audio.size(0)} channels"
-        
+
         if sr != self.audio_sr:
             resampler = torchaudio.transforms.Resample(sr, self.audio_sr)
             audio = resampler(audio)
@@ -107,14 +111,14 @@ class DatasetMDS(StreamingDataset):
         else:
             start = 0  # Default to start at 0 if exactly the required length or error handled above
 
-        audio = audio[start:start + self.audio_sr * self.audio_ref_len]
+        audio = audio[start : start + self.audio_sr * self.audio_ref_len]
 
         # Load DAC codes and re-arrange into the delay pattern
         labels = torch.tensor(data["dac"].astype(np.int64))
         labels = labels.unsqueeze(0)
         # add bos
         labels = torch.cat([self.bos_labels, labels], dim=-1)
-        
+
         labels, delay_pattern_mask = build_delay_pattern_mask(
             labels,
             bos_token_id=self.audio_encoder_bos_token_id,
@@ -135,15 +139,62 @@ class DatasetMDS(StreamingDataset):
         # we also remove the last timestampts (full of PAD)
         labels = labels[:, 1:]
 
-        # Load transcription
+        # Load and tokenize the transcription
         transcription = data["transcript"]
-        # Tokenize the transcription
         transcript_tokens = self.prompt_tokenizer(transcription)["input_ids"]
 
-        features = {"audio_ref": audio,
-                    "labels": labels,
-                    "prompt_input_ids": transcript_tokens,
-                    # "len_audio": len_audio # length of the original audio file, don't think we need this
-                    } 
+        features = {
+            "audio_ref": audio,
+            "labels": labels,
+            "prompt_input_ids": transcript_tokens,
+            # "len_audio": len_audio # length of the original audio file, don't think we need this
+        }
 
         return features
+
+
+class DataLoaderMDS(DataLoader):
+    def __init__(
+        self,
+        model_args: ModelArguments,
+        data_args: DataTrainingArguments,
+        training_args: ParlerTTSTrainingArguments,
+        manifest_path: str,
+        batch_size: int,
+        prompt_tokenizer: AutoTokenizer,
+        shuffle: bool,
+        collator: callable,  # TODO: Define this more specifically if possible
+        drop_last: bool,
+        epoch_size: Optional[int] = None,
+        num_canonical_nodes: Optional[int] = None,
+    ):
+        configure_aws_creds()
+
+        streams = gather_streams(
+            manifest_path=manifest_path,
+            s3_bucket_root=data_args.mds_s3_bucket_root,
+            mds_cache_dir=data_args.mds_cache_dir,
+        )
+
+        dataset = DatasetMDS(
+            streams=streams,
+            batch_size=batch_size,
+            prompt_tokenizer=prompt_tokenizer,
+            audio_ref_sample_rate=model_args.audio_ref_encoder_sr,
+            audio_ref_len=model_args.audio_ref_len,
+            num_codebooks=model_args.num_codebooks,
+            shuffle=shuffle,  # IterableDataset so we shuffle here rather than in DataLoader
+            cache_limit=data_args.mds_cache_limit,
+            epoch_size=epoch_size,
+            num_canonical_nodes=num_canonical_nodes,
+        )
+
+        super().__init__(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=False,  # Shuffle is handled by the dataset if required
+            collate_fn=collator,
+            drop_last=drop_last,
+            num_workers=training_args.dataloader_num_workers,
+            pin_memory=training_args.dataloader_pin_memory,
+        )

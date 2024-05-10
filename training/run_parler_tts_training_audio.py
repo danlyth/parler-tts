@@ -34,7 +34,7 @@ import transformers
 from accelerate import Accelerator
 from accelerate.utils import AutocastKwargs, InitProcessGroupKwargs, TorchDynamoPlugin, set_seed
 from accelerate.utils.memory import release_memory
-from datasets import DatasetDict, IterableDataset
+from datasets import IterableDataset
 from huggingface_hub import Repository, create_repo
 from multiprocess import set_start_method
 from torch.utils.data import DataLoader, Subset
@@ -45,6 +45,7 @@ from transformers import (
     HfArgumentParser,
 )
 from transformers.optimization import get_scheduler
+from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.utils import send_example_telemetry
 
 from parler_tts import (
@@ -53,8 +54,8 @@ from parler_tts import (
 )
 from training.arguments import DataTrainingArguments, ModelArguments, ParlerTTSTrainingArguments
 from training.data_local import DataCollator, DatasetLocal
-from training.data_mds import DatasetMDS, configure_aws_creds, gather_streams
-from training.eval import wer
+from training.data_mds import DataLoaderMDS
+from training.eval import compute_metrics
 from training.utils import get_last_checkpoint, log_metric, log_pred, rotate_checkpoints
 
 
@@ -77,9 +78,6 @@ def main():
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_parler_tts", model_args, data_args)
-
-    if data_args.use_mds:
-        configure_aws_creds()
 
     if training_args.dtype == "float16":
         mixed_precision = "fp16"
@@ -177,13 +175,11 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    # 1. First, let's instantiate the feature extractor (DAC), tokenizers and model
+    # 1. First, let's instantiate the tokenizers and model
     # Note for distributed training, the .from_pretrained methods guarantee that only
     # one local process can concurrently download model & vocab.
 
-    sample_rate = (
-        model_args.discrete_audio_feature_sample_rate
-    )  # TODO (Dan) need to get this from somewhere else as I won't be using the feature extractor
+    sample_rate = model_args.discrete_audio_feature_sample_rate
 
     # load prompt tokenizer
     prompt_tokenizer = AutoTokenizer.from_pretrained(
@@ -195,25 +191,16 @@ def main():
         padding_side="left",  # prompt has to be padded on the left bc it's preprend to codebooks hidden states
     )
 
-    # load description tokenizer # TODO (Dan) remove this if I decide not to use it at all
-    description_tokenizer = AutoTokenizer.from_pretrained(
-        model_args.description_tokenizer_name or model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        token=data_args.token,
-        trust_remote_code=data_args.trust_remote_code,
-        use_fast=model_args.use_fast_tokenizer,
-    )
-
     if model_args.use_fast_tokenizer:
         logger.warning(
             "Disabling fast tokenizer warning: https://github.com/huggingface/transformers/blob/main/src/transformers/tokenization_utils_base.py#L3231-L3235"
         )
         prompt_tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
-        description_tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
     # load audio reference encoder
     audio_ref_encoder = AutoModel.from_pretrained(model_args.audio_ref_encoder_name)
     audio_ref_encoder.to(training_args.device)
+    audio_ref_encoder.eval()
 
     # 3. Next, let's load the config.
     config = ParlerTTSConfig.from_pretrained(
@@ -263,11 +250,9 @@ def main():
     audio_encoder_eos_token_id = config.decoder.eos_token_id
     audio_encoder_bos_token_id = model.generation_config.decoder_start_token_id
 
-    # 2. Now, let's load the dataset # TODO (Dan) change numbering
     # Instantiate custom data collator
     data_collator = DataCollator(
         prompt_tokenizer=prompt_tokenizer,
-        # description_tokenizer=description_tokenizer,
         pad_to_multiple_of=data_args.pad_to_multiple_of,
         padding=padding,
         prompt_max_length=data_args.max_prompt_token_length,
@@ -275,27 +260,23 @@ def main():
         audio_max_length=audio_max_length,
     )
 
-    vectorized_datasets = DatasetDict()
-
-    # TODO (Dan) remove all this hard-coding
     if training_args.do_train:
         if data_args.use_mds:
-            streams = gather_streams(
-                data_args.mds_train_manifest_path, data_args.mds_s3_bucket_root, data_args.mds_cache_dir
-            )
-            vectorized_datasets["train"] = DatasetMDS(
-                streams=streams,
+            train_dataloader = DataLoaderMDS(
+                model_args=model_args,
+                data_args=data_args,
+                training_args=training_args,
+                manifest_path=data_args.mds_train_manifest_path,
                 batch_size=training_args.per_device_train_batch_size,
                 prompt_tokenizer=prompt_tokenizer,
-                audio_sample_rate=model_args.audio_ref_encoder_sr,
-                audio_ref_len=model_args.audio_ref_len,
                 shuffle=True,
-                cache_limit=data_args.mds_cache_limit,
                 epoch_size=data_args.max_train_samples,
+                collator=data_collator,
+                drop_last=True,
             )
 
         else:
-            vectorized_datasets["train"] = DatasetLocal(
+            train_dataset_local = DatasetLocal(
                 # root_audio_dir=data_args.root_audio_dir,
                 root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
                 # root_dac_dir=data_args.root_dac_dir,
@@ -312,30 +293,42 @@ def main():
 
             # TODO (Dan) check this works
             if data_args.max_train_samples is not None:
-                indices = random.sample(range(len(vectorized_datasets["train"])), data_args.max_train_samples)
-                vectorized_datasets["train"] = Subset(vectorized_datasets["train"], indices)
-                # vectorized_datasets["train"] = vectorized_datasets["train"].select(range(data_args.max_train_samples))
+                indices = random.sample(range(len(train_dataset_local)), data_args.max_train_samples)
+                train_dataset_local = Subset(train_dataset_local, indices)
+                # train_dataset_local = train_dataset_local.select(range(data_args.max_train_samples))
+            sampler = None
+            if training_args.group_by_length:
+                sampler = LengthGroupedSampler(
+                    training_args.per_device_train_batch_size * accelerator.num_processes,
+                    lengths=train_dataset_local["target_length"],
+                )
+            train_dataloader = DataLoader(
+                train_dataset_local,
+                collate_fn=data_collator,
+                batch_size=training_args.per_device_train_batch_size,
+                shuffle=True,
+                sampler=sampler,
+                num_workers=training_args.dataloader_num_workers,
+                pin_memory=training_args.dataloader_pin_memory,
+            )
 
     if training_args.do_eval:
         if data_args.use_mds:
-            streams = gather_streams(
-                data_args.mds_eval_manifest_path, data_args.mds_s3_bucket_root, data_args.mds_cache_dir
-            )
-            vectorized_datasets["eval"] = DatasetMDS(
-                streams=streams,
+            validation_dataloader = DataLoaderMDS(
+                model_args=model_args,
+                data_args=data_args,
+                training_args=training_args,
+                manifest_path=data_args.mds_eval_manifest_path,
                 batch_size=training_args.per_device_eval_batch_size,
                 prompt_tokenizer=prompt_tokenizer,
-                audio_sample_rate=model_args.audio_ref_encoder_sr,
-                audio_ref_len=model_args.audio_ref_len,
                 shuffle=False,
-                cache_limit=data_args.mds_cache_limit,
                 epoch_size=data_args.max_eval_samples,
+                collator=data_collator,
+                drop_last=True,
             )
 
-            # TODO (Dan) figure out how select particular number of eval samples with MDS
-
         else:
-            vectorized_datasets["eval"] = DatasetLocal(
+            valid_dataset_local = DatasetLocal(
                 # root_audio_dir=data_args.root_audio_dir,
                 root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
                 # root_dac_dir=data_args.root_dac_dir,
@@ -352,36 +345,34 @@ def main():
 
             # TODO (Dan) check this works
             if data_args.max_eval_samples is not None:
-                indices = random.sample(range(len(vectorized_datasets["eval"])), data_args.max_eval_samples)
-                vectorized_datasets["eval"] = Subset(vectorized_datasets["eval"], indices)
+                indices = random.sample(range(len(valid_dataset_local)), data_args.max_eval_samples)
+                valid_dataset_local = Subset(valid_dataset_local, indices)
 
-        validation_dataloader = DataLoader(
-            vectorized_datasets["eval"],
-            collate_fn=data_collator,
-            batch_size=training_args.per_device_eval_batch_size,
-            drop_last=True,
-            num_workers=training_args.dataloader_num_workers,
-            pin_memory=training_args.dataloader_pin_memory,
-        )
-        validation_dataloader = accelerator.prepare(validation_dataloader)
+            validation_dataloader = DataLoader(
+                valid_dataset_local,
+                collate_fn=data_collator,
+                batch_size=training_args.per_device_eval_batch_size,
+                drop_last=True,
+                num_workers=training_args.dataloader_num_workers,
+                pin_memory=training_args.dataloader_pin_memory,
+            )
 
     if training_args.predict_with_generate:
         if data_args.use_mds:
-            streams = gather_streams(
-                data_args.mds_generate_manifest_path, data_args.mds_s3_bucket_root, data_args.mds_cache_dir
-            )
-            vectorized_datasets["generate"] = DatasetMDS(
-                streams=streams,
+            generate_dataloader = DataLoaderMDS(
+                model_args=model_args,
+                data_args=data_args,
+                training_args=training_args,
+                manifest_path=data_args.mds_generate_manifest_path,
                 batch_size=training_args.per_device_eval_batch_size,
                 prompt_tokenizer=prompt_tokenizer,
-                audio_sample_rate=model_args.audio_ref_encoder_sr,
-                audio_ref_len=model_args.audio_ref_len,
                 shuffle=False,
-                cache_limit=data_args.mds_cache_limit,
-                epoch_size=data_args.max_generate_samples,
+                epoch_size=data_args.max_eval_samples,
+                collator=data_collator,
+                drop_last=True,
             )
         else:
-            vectorized_datasets["generate"] = DatasetLocal(
+            generate_dataset_local = DatasetLocal(
                 # root_audio_dir=data_args.root_audio_dir,
                 root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
                 # root_dac_dir=data_args.root_dac_dir,
@@ -396,49 +387,14 @@ def main():
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
             )
 
-        generate_dataloader = DataLoader(
-            vectorized_datasets["generate"],
-            collate_fn=data_collator,
-            batch_size=training_args.per_device_eval_batch_size,
-            drop_last=True,
-            num_workers=training_args.dataloader_num_workers,
-            pin_memory=training_args.dataloader_pin_memory,
-        )
-        generate_dataloader = accelerator.prepare(generate_dataloader)
-
-    # 6. Next, we can prepare the training.
-
-    # Let's use word CLAP similary and WER metrics as our evaluation metrics
-    # TODO (Dan) Move this to eval
-    def compute_metrics(
-        audios,
-        descriptions,
-        prompts,
-        asr_model_name_or_path,
-        clap_model_name_or_path,
-        batch_size,
-        description_tokenizer,
-        prompt_tokenizer,
-        sample_rate,
-        device="cpu",
-    ):
-        results = {}
-
-        # check if descriptions are tokenized (this is the case with text-description-to-speech)
-        if isinstance(descriptions[0], int):
-            texts = description_tokenizer.batch_decode(descriptions, skip_special_tokens=True)
-        else:
-            texts = descriptions
-        prompts = prompt_tokenizer.batch_decode(prompts, skip_special_tokens=True)
-        audios = [a.cpu().numpy() for a in audios]
-
-        # clap_score = clap_similarity(clap_model_name_or_path, texts, audios, device) # TODO temporarily removed
-        # results["clap"] = clap_score
-
-        word_error, transcriptions = wer(asr_model_name_or_path, prompts, audios, device, batch_size, sample_rate)
-        results["wer"] = word_error
-
-        return results, texts, prompts, audios, transcriptions
+            generate_dataloader = DataLoader(
+                generate_dataset_local,
+                collate_fn=data_collator,
+                batch_size=training_args.per_device_eval_batch_size,
+                drop_last=True,
+                num_workers=training_args.dataloader_num_workers,
+                pin_memory=training_args.dataloader_pin_memory,
+            )
 
     # Define Training Schedule
     # Store some constants
@@ -449,7 +405,8 @@ def main():
 
     if training_args.max_steps < 0:
         num_epochs = int(training_args.num_train_epochs)
-        steps_per_epoch = len(vectorized_datasets["train"]) // (train_batch_size * gradient_accumulation_steps)
+        # steps_per_epoch = len(train_dataset) // (train_batch_size * gradient_accumulation_steps)
+        steps_per_epoch = len(train_dataloader) // gradient_accumulation_steps
         total_train_steps = steps_per_epoch * num_epochs
     elif training_args.max_steps > 0:
         logger.info("max_steps is given, it will override any value given in num_train_epochs")
@@ -486,6 +443,9 @@ def main():
 
     # Prepare everything with accelerate
     model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
+    train_dataloader = accelerator.prepare(train_dataloader)
+    validation_dataloader = accelerator.prepare(validation_dataloader)
+    generate_dataloader = accelerator.prepare(generate_dataloader)
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {total_train_steps * train_batch_size * gradient_accumulation_steps}")
@@ -535,11 +495,13 @@ def main():
     with accelerator.main_process_first():
         # only the main process saves them
         if accelerator.is_main_process:
-            # save feature extractor, tokenizer and config
+            # save tokenizer and config
             if (
                 model_args.prompt_tokenizer_name is None
                 and model_args.description_tokenizer_name
-                or (model_args.prompt_tokenizer_name == model_args.description_tokenizer_name)
+                or (
+                    model_args.prompt_tokenizer_name == model_args.description_tokenizer_name
+                )  # NOTE not actually using description tokenizer
             ):
                 prompt_tokenizer.save_pretrained(training_args.output_dir)
             else:
@@ -548,7 +510,6 @@ def main():
                 )
                 prompt_tokenizer.save_pretrained(training_args.output_dir)
 
-            # feature_extractor.save_pretrained(training_args.output_dir)
             config.save_pretrained(training_args.output_dir)
 
     if checkpoint is not None:
@@ -665,32 +626,7 @@ def main():
         return output_audios
 
     for epoch in range(epochs_trained, num_epochs):
-        sampler = None
-        # TODO (Dan) fix sampler if needed
-        # if training_args.group_by_length:
-        #     sampler = LengthGroupedSampler(train_batch_size, lengths=vectorized_datasets["train"]["target_length"])
-        # TODO (Dan) move this DataLoader creation out of the epoch loop
-        if data_args.use_mds:
-            train_dataloader = DataLoader(
-                vectorized_datasets["train"],
-                collate_fn=data_collator,
-                batch_size=per_device_train_batch_size,
-                # shuffle=True, # TODO (Dan) shuffle doesn't work with IterableDataset, check that we're definitely shuffling
-                sampler=sampler,
-                num_workers=training_args.dataloader_num_workers,
-                pin_memory=training_args.dataloader_pin_memory,
-            )
-        else:
-            train_dataloader = DataLoader(
-                vectorized_datasets["train"],
-                collate_fn=data_collator,
-                batch_size=per_device_train_batch_size,
-                shuffle=True,
-                sampler=sampler,
-                num_workers=training_args.dataloader_num_workers,
-                pin_memory=training_args.dataloader_pin_memory,
-            )
-        train_dataloader = accelerator.prepare(train_dataloader)
+        # TODO Check the below
         if hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDataset):
             train_dataloader.dataset.set_epoch(epoch)
 
@@ -761,7 +697,6 @@ def main():
                     # ======================== Evaluating ==============================
                     eval_metrics = []
                     eval_preds = []
-                    eval_descriptions = []
                     eval_prompts = []
                     eval_start = time.time()
                     # release training input batch
@@ -797,8 +732,6 @@ def main():
                             )
                             generated_audios, prompts = accelerator.gather_for_metrics((generated_audios, prompts))
                             eval_preds.extend(generated_audios.to("cpu"))
-                            # eval_descriptions.extend(input_ids.to("cpu"))
-                            eval_descriptions.extend("No description")  # TODO (Dan) fix this hard-coding
                             eval_prompts.extend(prompts.to("cpu"))
 
                             samples_generated += batch["prompt_input_ids"].shape[0]
@@ -815,30 +748,22 @@ def main():
                     # compute metrics
                     metrics_desc = ""
                     if training_args.predict_with_generate:
-                        # metric_values, pred_descriptions, pred_prompts, audios, transcriptions = compute_metrics(
-                        #     eval_preds, eval_descriptions, eval_prompts, accelerator.device
-                        # ) # TODO (Dan), tidy this up
-                        metric_values, pred_descriptions, pred_prompts, audios, transcriptions = compute_metrics(
+                        metric_values, pred_prompts, audios, transcriptions = compute_metrics(
                             eval_preds,
-                            eval_descriptions,
                             eval_prompts,
                             model_args.asr_model_name_or_path,
                             model_args.clap_model_name_or_path,
                             per_device_eval_batch_size,
-                            description_tokenizer,
                             prompt_tokenizer,
                             sample_rate,
                             accelerator.device,
                         )
-                        pred_descriptions = [
-                            "No description" for _ in range(len(pred_prompts))
-                        ]  # TODO (Dan) remove this at some point
+
                         eval_metrics.update(metric_values)
                         metrics_desc = " ".join([f"Eval {key}: {value} |" for key, value in metric_values.items()])
                         if "wandb" in training_args.report_to:
                             log_pred(
                                 accelerator,
-                                pred_descriptions,
                                 pred_prompts,
                                 transcriptions,
                                 audios,
@@ -865,7 +790,6 @@ def main():
                     # release eval batch and relax metrics
                     eval_metrics = []
                     eval_preds = []
-                    eval_descriptions = []
                     eval_prompts = []
                     batch = release_memory(batch)
 
