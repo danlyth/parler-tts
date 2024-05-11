@@ -81,7 +81,6 @@ def log_metric(
 
 def log_pred(
     accelerator,
-    pred_descriptions: List[str],
     pred_prompts: List[str],
     transcriptions: List[str],
     audios: List[torch.Tensor],
