@@ -752,7 +752,6 @@ def main():
                             eval_preds,
                             eval_prompts,
                             model_args.asr_model_name_or_path,
-                            model_args.clap_model_name_or_path,
                             per_device_eval_batch_size,
                             prompt_tokenizer,
                             sample_rate,
