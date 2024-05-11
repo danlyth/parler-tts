@@ -97,11 +97,11 @@ def log_pred(
         prefix_pretty = prefix.replace("/", "-")
 
         # convert str data to a wandb compatible format
-        str_data = [[pred_descriptions[i], pred_prompts[i], transcriptions[i]] for i in range(len(pred_descriptions))]
+        str_data = [[pred_prompts[i], transcriptions[i]] for i in range(len(pred_prompts))]
         # log as a table with the appropriate headers
         wandb_tracker.log_table(
             table_name=f"predictions/{prefix_pretty}-step-{cur_step_pretty}",
-            columns=["Target descriptions", "Target prompts", "Predicted transcriptions"],
+            columns=["Target prompts", "Predicted transcriptions"],
             data=str_data[:num_lines],
             step=step,
             commit=False,
@@ -113,7 +113,7 @@ def log_pred(
                 "Speech samples": [
                     Audio(
                         audio,
-                        caption=f"{pred_prompts[i]} --- DESCRIPTION: {pred_descriptions[i]}",
+                        caption=f"{pred_prompts[i]}",
                         sample_rate=sampling_rate,
                     )
                     for (i, audio) in enumerate(audios[: min(len(audios), 100)])
