@@ -284,9 +284,9 @@ def main():
                 # metadata_path=data_args.train_metadata_path,
                 metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/train_local.tsv",
                 prompt_tokenizer=prompt_tokenizer,
-                audio_sr=16000,  # TODO (Dan) remove these three lines of hard-coding
-                audio_ref_len=2,
-                num_codebooks=9,
+                audio_sr=model_args.audio_ref_encoder_sr,  # TODO (Dan) remove these three lines of hard-coding
+                audio_ref_len=model_args.audio_ref_len,
+                num_codebooks=model_args.num_codebooks,
                 audio_encoder_bos_token_id=audio_encoder_bos_token_id,
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
             )
@@ -297,11 +297,11 @@ def main():
                 train_dataset_local = Subset(train_dataset_local, indices)
                 # train_dataset_local = train_dataset_local.select(range(data_args.max_train_samples))
             sampler = None
-            if training_args.group_by_length:
-                sampler = LengthGroupedSampler(
-                    training_args.per_device_train_batch_size * accelerator.num_processes,
-                    lengths=train_dataset_local["target_length"],
-                )
+            # if training_args.group_by_length:
+            #     sampler = LengthGroupedSampler(
+            #         training_args.per_device_train_batch_size * accelerator.num_processes,
+            #         lengths=train_dataset_local["target_length"],
+            #     )
             train_dataloader = DataLoader(
                 train_dataset_local,
                 collate_fn=data_collator,
@@ -336,9 +336,9 @@ def main():
                 # metadata_path=data_args.eval_metadata_path,
                 metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/dev_local.tsv",
                 prompt_tokenizer=prompt_tokenizer,
-                audio_sr=16000,  # TODO (Dan) remove all this hard-coding
-                audio_ref_len=2,
-                num_codebooks=9,
+                audio_sr=model_args.audio_ref_encoder_sr,  # TODO (Dan) remove all this hard-coding
+                audio_ref_len=model_args.audio_ref_len,
+                num_codebooks=model_args.num_codebooks,
                 audio_encoder_bos_token_id=audio_encoder_bos_token_id,
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
             )
@@ -380,9 +380,9 @@ def main():
                 # metadata_path=data_args.eval_metadata_path,
                 metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/test_local.tsv",
                 prompt_tokenizer=prompt_tokenizer,
-                audio_sr=16000,  # TODO (Dan) remove all this hard-coding
-                audio_ref_len=2,
-                num_codebooks=9,
+                audio_sr=model_args.audio_ref_encoder_sr,  # TODO (Dan) remove all this hard-coding
+                audio_ref_len=model_args.audio_ref_len,
+                num_codebooks=model_args.num_codebooks,
                 audio_encoder_bos_token_id=audio_encoder_bos_token_id,
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
             )
@@ -713,7 +713,7 @@ def main():
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metrics.append(eval_metric)
 
-                    num_samples_to_generate = 48  # TODO remove this hard-coding
+                    # num_samples_to_generate = 48  # TODO remove this hard-coding
                     samples_generated = 0
                     if training_args.predict_with_generate:
                         # release eval input batch (in favour of generate)
@@ -735,8 +735,8 @@ def main():
                             eval_prompts.extend(prompts.to("cpu"))
 
                             samples_generated += batch["prompt_input_ids"].shape[0]
-                            if samples_generated >= num_samples_to_generate:
-                                break  # TODO fix this hack properly
+                            # if samples_generated >= num_samples_to_generate:
+                                # break  # TODO fix this hack properly
 
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
