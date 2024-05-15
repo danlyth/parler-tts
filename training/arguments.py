@@ -96,7 +96,6 @@ class ModelArguments:
     )
     num_codebooks: int = field(default=9, metadata={"help": "Number of codebooks in the discrete audio feature."})
 
-
 @dataclass
 class DataTrainingArguments:
     """

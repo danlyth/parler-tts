@@ -1,3 +1,4 @@
+import torch
 import evaluate
 import torch
 from transformers import AutoModel, AutoProcessor, pipeline
@@ -34,23 +35,3 @@ def wer(asr_model_name_or_path, prompts, audios, device, per_device_eval_batch_s
     )
 
     return word_error, [t["text"] for t in transcriptions]
-
-
-def compute_metrics(
-    audios,
-    prompts,
-    asr_model_name_or_path,
-    batch_size,
-    prompt_tokenizer,
-    sample_rate,
-    device="cpu",
-):
-    results = {}
-
-    prompts = prompt_tokenizer.batch_decode(prompts, skip_special_tokens=True)
-    audios = [a.cpu().numpy() for a in audios]
-
-    word_error, transcriptions = wer(asr_model_name_or_path, prompts, audios, device, batch_size, sample_rate)
-    results["wer"] = word_error
-
-    return results, prompts, audios, transcriptions
