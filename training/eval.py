@@ -1,4 +1,3 @@
-import torch
 import evaluate
 import torch
 from transformers import AutoModel, AutoProcessor, pipeline
