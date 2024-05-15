@@ -551,6 +551,7 @@ def main():
 
     # Define gradient update step fn
     def train_step(
+        model,
         batch,
         accelerator,
         autocast_kwargs,
@@ -572,18 +573,20 @@ def main():
         outputs = model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
-
         metrics = {"loss": ce_loss}
         return ce_loss, metrics
 
     # Define eval fn
     def eval_step(
+        model,
         batch,
         accelerator,
         autocast_kwargs,
     ):
-        eval_model = model if not training_args.torch_compile else model._orig_mod
-        eval_model.eval()
+        if training_args.torch_compile:
+            model = model._orig_mod
+
+        model.eval()
 
         with accelerator.autocast(autocast_handler=autocast_kwargs):
             if training_args.parallel_mode.value != "distributed":  # TODO check we're supporting this properly
@@ -596,13 +599,25 @@ def main():
             # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
 
         with torch.no_grad():
-            outputs = eval_model(**batch)
+            outputs = model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
         metrics = {"loss": ce_loss}
+
         return metrics
 
-    def generate_step(batch):
+    def generate_step(
+        model,
+        batch,
+        accelerator,
+        autocast_kwargs,
+    ):
+        if training_args.torch_compile:
+            model = model._orig_mod
+
+        model = accelerator.unwrap_model(model, keep_fp32_wrapper=mixed_precision != "fp16")
+        model.eval()
+
         with accelerator.autocast(autocast_handler=autocast_kwargs):
             if training_args.parallel_mode.value != "distributed":  # TODO check we're supporting this properly
                 with torch.no_grad():
@@ -615,13 +630,9 @@ def main():
 
         batch.pop("audio_ref", None)
         batch.pop("audio_ref_attention_mask", None)
-
         batch.pop("decoder_attention_mask", None)
-        eval_model = accelerator.unwrap_model(model, keep_fp32_wrapper=mixed_precision != "fp16").eval()
-        if training_args.torch_compile:
-            eval_model = model._orig_mod
 
-        output_audios = eval_model.generate(**batch, **gen_kwargs)
+        output_audios = model.generate(**batch, **gen_kwargs)
         output_audios = accelerator.pad_across_processes(output_audios, dim=1, pad_index=0)
         return output_audios
 
@@ -637,7 +648,7 @@ def main():
 
         for batch in train_dataloader:
             with accelerator.accumulate(model):
-                loss, train_metric = train_step(batch, accelerator, autocast_kwargs)
+                loss, train_metric = train_step(model, batch, accelerator, autocast_kwargs)
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), training_args.max_grad_norm)
@@ -709,7 +720,7 @@ def main():
                         disable=not accelerator.is_local_main_process,
                     ):
                         # Model forward
-                        eval_metric = eval_step(batch, accelerator, autocast_kwargs)
+                        eval_metric = eval_step(model, batch, accelerator, autocast_kwargs)
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metrics.append(eval_metric)
 
@@ -725,7 +736,7 @@ def main():
                             position=2,
                             disable=not accelerator.is_local_main_process,
                         ):
-                            generated_audios = generate_step(batch)
+                            generated_audios = generate_step(model, batch, accelerator, autocast_kwargs)
                             # Gather all predictions and targets
                             generated_audios, prompts = accelerator.pad_across_processes(
                                 (generated_audios, batch["prompt_input_ids"]), dim=1, pad_index=0
@@ -736,7 +747,7 @@ def main():
 
                             samples_generated += batch["prompt_input_ids"].shape[0]
                             # if samples_generated >= num_samples_to_generate:
-                                # break  # TODO fix this hack properly
+                            # break  # TODO fix this hack properly
 
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
