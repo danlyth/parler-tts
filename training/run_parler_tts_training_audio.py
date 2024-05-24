@@ -575,8 +575,7 @@ def main():
         outputs = model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
-        metrics = {"loss": ce_loss,
-                   "ramon_test": 12.0}
+        metrics = {"loss": ce_loss}
         return ce_loss, metrics
 
     # Define eval fn
@@ -727,7 +726,6 @@ def main():
                         eval_metric = eval_step(model, batch, accelerator, autocast_kwargs)
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metrics.append(eval_metric)
-                        break
 
                     # num_samples_to_generate = 48  # TODO remove this hard-coding
                     samples_generated = 0
