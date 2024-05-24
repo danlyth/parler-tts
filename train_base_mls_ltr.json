@@ -12,7 +12,7 @@
     "report_to": ["wandb"],
     "wandb_project": "parler-tts_base_spk_sim",
     "overwrite_output_dir": false,
-    "output_dir": "/ephemeral_volume/ramon/tts/exp_parler-tts/ramontest",
+    "output_dir": "/ephemeral_volume/ramon/tts/exp_parler-tts/spk_sim",
     
     "use_mds": true,
     "mds_s3_bucket_root": "s3://sesame-ml-datasets/",
