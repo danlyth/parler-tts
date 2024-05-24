@@ -27,6 +27,8 @@ import sys
 import time
 from datetime import timedelta
 from pathlib import Path
+from scipy.io.wavfile import write
+import torchaudio
 
 import datasets
 import torch
@@ -276,7 +278,7 @@ def main():
             )
 
         else:
-            train_dataset_local = DatasetLocal(
+            train_dataset_locah = DatasetLocal(
                 # root_audio_dir=data_args.root_audio_dir,
                 root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
                 # root_dac_dir=data_args.root_dac_dir,
@@ -573,7 +575,8 @@ def main():
         outputs = model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
-        metrics = {"loss": ce_loss}
+        metrics = {"loss": ce_loss,
+                   "ramon_test": 12.0}
         return ce_loss, metrics
 
     # Define eval fn
@@ -708,6 +711,7 @@ def main():
                     # ======================== Evaluating ==============================
                     eval_metrics = []
                     eval_preds = []
+                    eval_refs = []
                     eval_prompts = []
                     eval_start = time.time()
                     # release training input batch
@@ -723,6 +727,7 @@ def main():
                         eval_metric = eval_step(model, batch, accelerator, autocast_kwargs)
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metrics.append(eval_metric)
+                        break
 
                     # num_samples_to_generate = 48  # TODO remove this hard-coding
                     samples_generated = 0
@@ -736,6 +741,7 @@ def main():
                             position=2,
                             disable=not accelerator.is_local_main_process,
                         ):
+                            eval_refs.extend(batch["audio_ref"])
                             generated_audios = generate_step(model, batch, accelerator, autocast_kwargs)
                             # Gather all predictions and targets
                             generated_audios, prompts = accelerator.pad_across_processes(
@@ -747,7 +753,7 @@ def main():
 
                             samples_generated += batch["prompt_input_ids"].shape[0]
                             # if samples_generated >= num_samples_to_generate:
-                            # break  # TODO fix this hack properly
+                            break  # TODO fix this hack properly
 
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
@@ -761,6 +767,7 @@ def main():
                     if training_args.predict_with_generate:
                         metric_values, pred_prompts, audios, transcriptions = compute_metrics(
                             eval_preds,
+                            eval_refs,
                             eval_prompts,
                             model_args.asr_model_name_or_path,
                             per_device_eval_batch_size,

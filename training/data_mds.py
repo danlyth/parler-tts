@@ -2,13 +2,24 @@ import io
 import os
 from pathlib import Path
 from typing import Optional
+import json
 
 import numpy as np
 import torch
+from parler_tts.dac_wrapper.modeling_dac import DACModel
+from parler_tts.dac_wrapper import DACConfig, DACModel
+from transformers import AutoConfig, AutoModel
+
+AutoConfig.register("dac", DACConfig)
+AutoModel.register(DACConfig, DACModel)
+
 import torchaudio
-from streaming import Stream, StreamingDataset
+from streaming import Stream, StreamingDataset, StreamingDataLoader
 from torch.utils.data import DataLoader
+
 from transformers import AutoTokenizer
+from typing import Dict, Any
+
 
 from parler_tts.modeling_parler_tts import build_delay_pattern_mask
 from training.arguments import DataTrainingArguments, ModelArguments, ParlerTTSTrainingArguments
@@ -78,13 +89,15 @@ class DatasetMDS(StreamingDataset):
         self.audio_encoder_bos_token_id = audio_encoder_bos_token_id
         self.audio_encoder_eos_token_id = audio_encoder_eos_token_id
         self.bos_labels = torch.ones((1, num_codebooks, 1)) * audio_encoder_bos_token_id
+        self.num_samples = 0
+        #self.dac = DACModel()
 
     def __len__(self):
         return super().__len__()
 
     def __getitem__(self, idx):
         data = super().__getitem__(idx)
-
+        self.num_samples += 1
         # Available keys in data:
         # 'dac', 'flac', 'length_ms', 'n_words', 'transcript', 'whisper_average_logprob',
         # 'whisper_max_logprob', 'whisper_min_logprob', 'whisper_sum_logprob'
@@ -118,6 +131,7 @@ class DatasetMDS(StreamingDataset):
         labels = labels.unsqueeze(0)
         # add bos
         labels = torch.cat([self.bos_labels, labels], dim=-1)
+        #self.dac.decode(labels)
 
         labels, delay_pattern_mask = build_delay_pattern_mask(
             labels,
@@ -153,7 +167,8 @@ class DatasetMDS(StreamingDataset):
         return features
 
 
-class DataLoaderMDS(DataLoader):
+# class DataLoaderMDS(DataLoader)
+class DataLoaderMDS(StreamingDataLoader):
     def __init__(
         self,
         model_args: ModelArguments,

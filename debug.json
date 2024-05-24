@@ -11,7 +11,7 @@
 
     "report_to": ["wandb"],
     "wandb_project": "parler-tts_base_ramontest",
-    "overwrite_output_dir": false,
+    "overwrite_output_dir": true,
     "output_dir": "/ephemeral_volume/ramon/tts/exp_parler-tts/ramontest",
     
     "use_mds": true,
@@ -24,7 +24,7 @@
 
     "audio_ref_len": 3,
     
-    "preprocessing_num_workers": 8,
+    "preprocessing_num_workers": 1,
     
     "do_train": true,
     "num_train_epochs": 40,
@@ -45,15 +45,15 @@
     "do_eval": true,
     "evaluation_strategy": "steps",
     "eval_steps": 1000,
-    "per_device_eval_batch_size": 8,
+    "per_device_eval_batch_size": 1,
     
     "predict_with_generate": true,
     "add_audio_samples_to_wandb": true,
     
     "include_inputs_for_metrics": true,
-    "save_steps": 1000,
+    "save_steps": 1,
     
-    "audio_encoder_per_device_batch_size": 24,
+    "audio_encoder_per_device_batch_size": 1,
     "dtype": "bfloat16",
     "seed": 456,
     
