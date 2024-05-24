@@ -6,12 +6,7 @@ import json
 
 import numpy as np
 import torch
-from parler_tts.dac_wrapper.modeling_dac import DACModel
-from parler_tts.dac_wrapper import DACConfig, DACModel
-from transformers import AutoConfig, AutoModel
-
-AutoConfig.register("dac", DACConfig)
-AutoModel.register(DACConfig, DACModel)
+from .parler_tts.dac_wrapp.dac_wrapper import modeling_dac
 
 import torchaudio
 from streaming import Stream, StreamingDataset, StreamingDataLoader
@@ -90,7 +85,6 @@ class DatasetMDS(StreamingDataset):
         self.audio_encoder_eos_token_id = audio_encoder_eos_token_id
         self.bos_labels = torch.ones((1, num_codebooks, 1)) * audio_encoder_bos_token_id
         self.num_samples = 0
-        #self.dac = DACModel()
 
     def __len__(self):
         return super().__len__()
@@ -131,7 +125,6 @@ class DatasetMDS(StreamingDataset):
         labels = labels.unsqueeze(0)
         # add bos
         labels = torch.cat([self.bos_labels, labels], dim=-1)
-        #self.dac.decode(labels)
 
         labels, delay_pattern_mask = build_delay_pattern_mask(
             labels,
