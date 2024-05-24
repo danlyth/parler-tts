@@ -120,6 +120,9 @@ class DatasetMDS(StreamingDataset):
 
         # Load DAC codes and re-arrange into the delay pattern
         labels = torch.tensor(data["dac"].astype(np.int64))
+        assert (
+            labels.size(0) == self.num_codebooks
+        ), f"Number of codebooks != specified number of codebooks ({self.num_codebooks})"
         labels = labels.unsqueeze(0)
         # add bos
         labels = torch.cat([self.bos_labels, labels], dim=-1)
