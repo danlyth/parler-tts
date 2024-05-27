@@ -7,6 +7,7 @@ from itertools import islice
 from accelerate import Accelerator
 from accelerate.utils import InitProcessGroupKwargs
 from torch.utils.data import DataLoader
+from torch.utils.data import Subset
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -20,28 +21,29 @@ def parse_args():
     parser.add_argument("--manifest_path", type=str, required=True, help="Path to manifest file.")
     parser.add_argument("--s3_bucket_root", type=str, required=True, help="S3 bucket root.")
     parser.add_argument("--mds_cache_dir", type=str, required=True, help="MDS cache directory.")
-    parser.add_argument("--shuffle", type=bool, default=True, help="Shuffle the dataset.")
-    parser.add_argument("--prefetch", type=int, default=10000, help="Number of samples to prefetch.")
     parser.add_argument("--retry", type=int, default=2, help="Number of retries for loading data.")
     parser.add_argument("--timeout", type=int, default=60, help="Timeout for loading data.")
     parser.add_argument("--num_workers", type=int, default=12, help="Number of worker threads.")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size.")
-    parser.add_argument("--drop_last", type=bool, default=True, help="Drop last incomplete batch.")
-    parser.add_argument("--pin_memory", type=bool, default=True, help="Pin memory.")
-    parser.add_argument("--segment_duration", type=int, default=20, help="Segment duration.")
     parser.add_argument("--cache_limit", type=str, default="10tb", help="Cache limit.")
     parser.add_argument("--num_codebooks", type=int, default=9, help="Number of codebooks.")
-    parser.add_argument("--use_accelerate", type=bool, default=False, help="Prepare the dataloader with accelerate.")
-    parser.add_argument("--debug", type=bool, default=False, help="Breakpoint at dataset.")
+    parser.add_argument("--num_samples", type=int, default=100, help="Number of samples to load from dataset.")
+    parser.add_argument("--audio_ref_len", type=int, default=2, help="Length of audio reference.")
+    parser.add_argument("--num_debug_samples", type=int, default=None, help="Number of samples to debug.")
+    parser.add_argument("--max_audio_token_length", type=int, default=None, help="Max length of audio codes.")
+    parser.add_argument("--max_prompt_token_length", type=int, default=None, help="Max length of prompt tokens.")
+    parser.add_argument("--shuffle", action="store_true", help="Shuffle the dataset.")
+    parser.add_argument("--drop_last", action="store_true", help="Drop last incomplete batch.")
+    parser.add_argument("--pin_memory", action="store_true", help="Pin memory.")
+    parser.add_argument("--use_accelerate", action="store_true", help="Prepare the dataloader with accelerate.")
+    parser.add_argument("--debug", action="store_true", help="Breakpoint at dataset.")
 
     return parser.parse_args()
 
 
 def main(args):
-    print(f"Num workers: {args.num_workers}")
-    print(f"Batch size: {args.batch_size}")
-    print(f"Segment duration: {args.segment_duration}")
-    print(f"Shuffle: {args.shuffle}")
+    for arg in vars(args):
+        print(f"{arg}: {getattr(args, arg)}")
 
     # load prompt tokenizer
     prompt_tokenizer = AutoTokenizer.from_pretrained(
@@ -53,7 +55,18 @@ def main(args):
         padding_side="left",  # prompt has to be padded on the left bc it's preprend to codebooks hidden states
     )
 
-    data_collator = DataCollator(prompt_tokenizer)
+    if args.max_audio_token_length or args.max_prompt_token_length is not None:
+        print(
+            f"Using max audio token length: {args.max_audio_token_length} and max prompt token length: {args.max_prompt_token_length}"
+        )
+        data_collator = DataCollator(
+            prompt_tokenizer,
+            audio_max_length=args.max_audio_token_length,
+            prompt_max_length=args.max_prompt_token_length,
+            padding="max_length",
+        )
+    else:
+        data_collator = DataCollator(prompt_tokenizer)
 
     configure_aws_creds()
 
@@ -63,29 +76,36 @@ def main(args):
         streams,
         batch_size=args.batch_size,
         shuffle=args.shuffle,
-        prefetch=args.prefetch,
         retry=args.retry,
         timeout=args.timeout,
         cache_limit=args.cache_limit,
         prompt_tokenizer=prompt_tokenizer,
         audio_ref_sample_rate=16000,
-        audio_ref_len=2,
-        epoch_size=None,
+        audio_ref_len=args.audio_ref_len,
+        epoch_size=args.num_samples,
         num_codebooks=args.num_codebooks,
     )
 
-    for features in islice(dataset, 0, 1):
-        print("Dataset loading correctly")
+    print(f"Length of dataset is {len(dataset)}")
+
+    if args.num_debug_samples is None:
+        num_debug_samples = len(dataset)
+    else:
+        num_debug_samples = min(len(dataset), args.num_debug_samples)
+    count = 0
+    for i, features in tqdm(
+        enumerate(islice(dataset, 0, num_debug_samples)), total=num_debug_samples, desc="Loading dataset"
+    ):
         audio_ref = features["audio_ref"]
         labels = features["labels"]
         prompt_input_ids = features["prompt_input_ids"]
-        print(f"Audio ref shape: {audio_ref.shape}")
-        print(f"Labels shape: {labels.shape}")
-        print(f"Prompt input ids length: {len(prompt_input_ids)}")
+        count += 1
         if args.debug:
+            print("Dataset loading correctly")
+            print(f"Audio ref shape: {audio_ref.shape}")
+            print(f"Labels shape: {labels.shape}")
+            print(f"Prompt input ids length: {len(prompt_input_ids)}")
             breakpoint()
-
-    print(f"Length of dataset is {len(dataset)}")
 
     dataloader = DataLoader(
         dataset,
@@ -106,26 +126,35 @@ def main(args):
             dispatch_batches=False,  # TODO (Dan) testing this as our batches are not all the same length
             kwargs_handlers=kwargs_handlers,
         )
-        os.environ["TOKENIZERS_PARALLELISM"] = "false"
         print("Preparing dataloader with accelerate")
         dataloader = accelerator.prepare(dataloader)
 
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     # The 'length' of the dataloader is the length of the dataset/number of batches
     print(f"Length of dataloader is {len(dataloader)}")
 
     tic = time.time()
     count = 0
+    codebook_shapes = []
+    prompt_shapes = []
     for features in tqdm(dataloader):
         count += args.batch_size
+        codebooks = features["labels"]
+        codebook_shapes.append(codebooks.shape)
+        prompt_input_ids = features["prompt_input_ids"]
+        prompt_shapes.append(prompt_input_ids.shape)
 
         if count % (args.batch_size * 10) == 0:
             print(f"Count: {count}")
             print(f"Count per second: {count / (time.time() - tic):.2f}")
+            if args.debug:
+                breakpoint()
 
     toc = time.time()
     print(f"Finished loading in {toc - tic:.2f} seconds")
     print(f"Final count: {count}")
     print(f"Final count per second: {count / (toc - tic):.2f}")
+    breakpoint()
 
 
 if __name__ == "__main__":
