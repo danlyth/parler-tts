@@ -5,6 +5,7 @@ from typing import Optional
 import json
 
 import numpy as np
+import streaming
 import torch
 
 import torchaudio
@@ -30,18 +31,22 @@ def gather_streams(manifest_path: str, s3_bucket_root: str, mds_cache_dir: str):
         s3_bucket_root (str): Path to s3 bucket containing the above datasets.
         mds_cache_dir (str or Path): Path to local directory to store the downloaded datasets.
     """
+
+    streaming.base.util.clean_stale_shared_memory()
+
     mds_cache_dir = Path(mds_cache_dir)
 
     with open(manifest_path, "r") as f:  # type: ignore
         dataset_names = f.read().splitlines()
     dataset_names = [dataset_name.strip() for dataset_name in dataset_names]
+    cache_dirs = [mds_cache_dir / Path(*dataset_name.split("/")) for dataset_name in dataset_names]
 
     # s3_bucket_root is, for example, s3://my-data-bucket/
     buckets = [str(s3_bucket_root + dataset_name) for dataset_name in dataset_names]
     assert len(buckets) > 0, "No datasets found in manifest."
 
-    # Should now have e.g. ["s3://my-data-bucket/mls_eng_train_dac", "s3://my-data-bucket/mls_eng_dev_dac", etc.]
-    streams = [Stream(remote=bucket, local=mds_cache_dir / f"{bucket.split('/')[-1]}") for bucket in buckets]
+    # Should now have e.g. ["s3://my-data-bucket/dataset_name_1", "s3://my-data-bucket/dataset_name_2", etc.]
+    streams = [Stream(remote=bucket, local=cache_dir) for bucket, cache_dir in zip(buckets, cache_dirs)]
 
     return streams
 
@@ -118,6 +123,9 @@ class DatasetMDS(StreamingDataset):
 
         # Load DAC codes and re-arrange into the delay pattern
         labels = torch.tensor(data["dac"].astype(np.int64))
+        assert (
+            labels.size(0) == self.num_codebooks
+        ), f"Number of codebooks != specified number of codebooks ({self.num_codebooks})"
         labels = labels.unsqueeze(0)
         # add bos
         labels = torch.cat([self.bos_labels, labels], dim=-1)

@@ -89,12 +89,12 @@ def main():
         mixed_precision = "no"
 
     if data_args.pad_to_max_length and (
-        data_args.max_duration_in_seconds is None
+        data_args.max_audio_token_length is None
         or data_args.max_prompt_token_length is None
         or data_args.max_description_token_length is None
     ):
         raise ValueError(
-            "`pad_to_max_length` is `True` but one of the following parameters has not been set: `max_duration_in_seconds`, `max_prompt_token_length`, `max_description_token_length`"
+            "`pad_to_max_length` is `True` but one of the following parameters has not been set: `max_audio_token_length`, `max_prompt_token_length`, `max_description_token_length`"
         )
 
     padding = "max_length" if data_args.pad_to_max_length else "longest"
@@ -238,20 +238,10 @@ def main():
     # Freeze Encoders
     model.freeze_encoders(model_args.freeze_text_encoder)
 
-    audio_max_length = None
-    # if training_args.torch_compile:  # NOTE This doesn't currently work
-    #     audio_max_length = max(vectorized_datasets["train"]["target_length"])
-    #     with accelerator.main_process_first():
-    #         max_sample = vectorized_datasets["train"].filter(
-    #             lambda x: x == audio_max_length,
-    #             num_proc=num_workers,
-    #             input_columns=["target_length"],
-    #         )
-    #     audio_max_length = torch.tensor(max_sample[0]["labels"]).shape[1]
-
     audio_encoder_eos_token_id = config.decoder.eos_token_id
     audio_encoder_bos_token_id = model.generation_config.decoder_start_token_id
 
+    print("Loading datasets...")
     # Instantiate custom data collator
     data_collator = DataCollator(
         prompt_tokenizer=prompt_tokenizer,
@@ -259,7 +249,7 @@ def main():
         padding=padding,
         prompt_max_length=data_args.max_prompt_token_length,
         # description_max_length=data_args.max_description_token_length,
-        audio_max_length=audio_max_length,
+        audio_max_length=data_args.max_audio_token_length,
     )
 
     if training_args.do_train:
@@ -293,7 +283,6 @@ def main():
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
             )
 
-            # TODO (Dan) check this works
             if data_args.max_train_samples is not None:
                 indices = random.sample(range(len(train_dataset_local)), data_args.max_train_samples)
                 train_dataset_local = Subset(train_dataset_local, indices)
@@ -345,7 +334,6 @@ def main():
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
             )
 
-            # TODO (Dan) check this works
             if data_args.max_eval_samples is not None:
                 indices = random.sample(range(len(valid_dataset_local)), data_args.max_eval_samples)
                 valid_dataset_local = Subset(valid_dataset_local, indices)
@@ -366,10 +354,10 @@ def main():
                 data_args=data_args,
                 training_args=training_args,
                 manifest_path=data_args.mds_generate_manifest_path,
-                batch_size=training_args.per_device_eval_batch_size,
+                batch_size=data_args.per_device_generate_batch_size,
                 prompt_tokenizer=prompt_tokenizer,
                 shuffle=False,
-                epoch_size=data_args.max_eval_samples,
+                epoch_size=data_args.max_generate_samples,
                 collator=data_collator,
                 drop_last=True,
             )
@@ -389,10 +377,14 @@ def main():
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
             )
 
+            if data_args.max_generate_samples is not None:
+                indices = random.sample(range(len(generate_dataset_local)), data_args.max_generate_samples)
+                generate_dataset_local = Subset(generate_dataset_local, indices)
+
             generate_dataloader = DataLoader(
                 generate_dataset_local,
                 collate_fn=data_collator,
-                batch_size=training_args.per_device_eval_batch_size,
+                batch_size=data_args.per_device_generate_batch_size,
                 drop_last=True,
                 num_workers=training_args.dataloader_num_workers,
                 pin_memory=training_args.dataloader_pin_memory,
@@ -403,7 +395,6 @@ def main():
     per_device_train_batch_size = int(training_args.per_device_train_batch_size)
     train_batch_size = per_device_train_batch_size * accelerator.num_processes
     gradient_accumulation_steps = int(training_args.gradient_accumulation_steps)
-    per_device_eval_batch_size = int(training_args.per_device_eval_batch_size)
 
     if training_args.max_steps < 0:
         num_epochs = int(training_args.num_train_epochs)
@@ -450,7 +441,8 @@ def main():
     generate_dataloader = accelerator.prepare(generate_dataloader)
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {total_train_steps * train_batch_size * gradient_accumulation_steps}")
+    logger.info(f"  Num samples in training dataset = {(len(train_dataloader)*train_batch_size):,}")
+    logger.info(f"  Num examples = {(total_train_steps * train_batch_size * gradient_accumulation_steps):,}")
     logger.info("  Instantaneous batch size per device =" f" {per_device_train_batch_size}")
     logger.info("  Gradient accumulation steps =" f" {gradient_accumulation_steps}")
     logger.info(
@@ -528,10 +520,6 @@ def main():
 
         steps_trained_progress_bar.update(cur_step)
 
-        # TODO (Dan) fix shuffling so that you can continue from a checkpoint properly
-        # for epoch in range(0, epochs_trained):
-        # vectorized_datasets["train"] = vectorized_datasets["train"].shuffle(training_args.seed)
-
         if training_args.max_steps < 0:
             # we know exactly the number of steps per epoch, so can skip through the required number of batches
             resume_step = (cur_step - epochs_trained * steps_per_epoch) * gradient_accumulation_steps
@@ -540,8 +528,6 @@ def main():
             # So we just shuffle the dataset one extra time and start from a fresh epoch
             # This is "good enough" for our purposes but not fully correct
             resume_step = None
-            # TODO (Dan) fix shuffling
-            # vectorized_datasets["train"] = vectorized_datasets["train"].shuffle(training_args.seed)
     else:
         resume_step = None
 
@@ -561,15 +547,10 @@ def main():
         model.train()
 
         with accelerator.autocast(autocast_handler=autocast_kwargs):
-            if training_args.parallel_mode.value != "distributed":  # TODO (Dan) check we're supporting this properly
-                with torch.no_grad():  # Does autocast take care of this?
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])  # TODO move this to dataset?
-            else:
-                with torch.no_grad():  # Does autocast take care of this?
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-            batch["encoder_outputs"] = (
-                encoder_outputs  # Size (batch_size, audio_ref length / downsampling, hidden_size)
-            )
+            with torch.no_grad():  # Does autocast take care of this?
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            batch["encoder_outputs"] = encoder_outputs
+            # Size (batch_size, audio_ref length / downsampling, hidden_size)
             # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"]) # Can do this because we're not using padding
 
         outputs = model(**batch)
@@ -591,12 +572,8 @@ def main():
         model.eval()
 
         with accelerator.autocast(autocast_handler=autocast_kwargs):
-            if training_args.parallel_mode.value != "distributed":  # TODO check we're supporting this properly
-                with torch.no_grad():
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-            else:
-                with torch.no_grad():
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            with torch.no_grad():
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
             batch["encoder_outputs"] = encoder_outputs
             # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
 
@@ -621,12 +598,8 @@ def main():
         model.eval()
 
         with accelerator.autocast(autocast_handler=autocast_kwargs):
-            if training_args.parallel_mode.value != "distributed":  # TODO check we're supporting this properly
-                with torch.no_grad():
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-            else:
-                with torch.no_grad():
-                    encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            with torch.no_grad():
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
             batch["encoder_outputs"] = encoder_outputs
             # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
 
@@ -705,7 +678,6 @@ def main():
                 if training_args.do_eval and (
                     cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1
                 ):
-                    # TODO (Dan) I added this condition to evaluate at the first step, might not want it after debugging
                     train_time += time.time() - train_start
                     # ======================== Evaluating ==============================
                     eval_metrics = []
@@ -727,8 +699,6 @@ def main():
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metrics.append(eval_metric)
 
-                    # num_samples_to_generate = 48  # TODO remove this hard-coding
-                    samples_generated = 0
                     if training_args.predict_with_generate:
                         # release eval input batch (in favour of generate)
                         batch = release_memory(batch)
@@ -749,10 +719,6 @@ def main():
                             eval_preds.extend(generated_audios.to("cpu"))
                             eval_prompts.extend(prompts.to("cpu"))
 
-                            samples_generated += batch["prompt_input_ids"].shape[0]
-                            # if samples_generated >= num_samples_to_generate:
-                            break  # TODO fix this hack properly
-
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
                     eval_metrics = {
@@ -768,7 +734,7 @@ def main():
                             eval_refs,
                             eval_prompts,
                             model_args.asr_model_name_or_path,
-                            per_device_eval_batch_size,
+                            data_args.per_device_generate_batch_size,
                             prompt_tokenizer,
                             sample_rate,
                             accelerator.device,

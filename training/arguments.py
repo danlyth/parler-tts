@@ -96,6 +96,7 @@ class ModelArguments:
     )
     num_codebooks: int = field(default=9, metadata={"help": "Number of codebooks in the discrete audio feature."})
 
+
 @dataclass
 class DataTrainingArguments:
     """
@@ -247,6 +248,15 @@ class DataTrainingArguments:
             )
         },
     )
+    max_audio_token_length: int = field(
+        default=None,
+        metadata={
+            "help": (
+                "If set, filter samples with audio that are longer than `max_audio_token_length` tokens."
+                "Also, used to set maximum audio token length if `pad_to_max_length=True`."
+            )
+        },
+    )
     pad_to_max_length: bool = field(
         default=False,
         metadata={
@@ -331,6 +341,10 @@ class DataTrainingArguments:
     mds_cache_limit: str = field(
         default="5tb",
         metadata={"help": "The cache limit for MDS."},
+    )
+    per_device_generate_batch_size: int = field(
+        default=8,
+        metadata={"help": "The batch size per GPU for generation."},
     )
 
 
