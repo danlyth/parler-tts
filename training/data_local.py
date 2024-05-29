@@ -149,6 +149,9 @@ class DataCollator:
         labels = [feature["labels"].transpose(0, 1) for feature in features]
         labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100) # TODO remove this hardcoded value
         if self.audio_max_length is not None and self.padding == "max_length":
+            # Crop to max length if required
+            labels = labels[:, :self.audio_max_length, :]
+            # Pad to max length if required
             labels = torch.nn.functional.pad(labels, pad=(0, 0, 0, max(self.audio_max_length - labels.shape[1], 0)))
 
         batch = {"labels": labels}
@@ -159,7 +162,11 @@ class DataCollator:
         # output["labels"] = labels.squeeze(0).transpose(1, 2)
         # output["ratio"] = torch.ones_like(len_audio) * labels.shape[-1] / len_audio.max()
 
-        prompt_input_ids = [{"input_ids": feature["prompt_input_ids"]} for feature in features]
+        # Crop prompt_input_ids to max length if required
+        prompt_input_ids = [feature["prompt_input_ids"][:self.prompt_max_length] for feature in features]
+        prompt_input_ids = [{"input_ids": x} for x in prompt_input_ids]
+        # prompt_input_ids = [{"input_ids": feature["prompt_input_ids"]} for feature in features]
+        # Crop prompt_input_ids to max length if required
         prompt_input_ids = self.prompt_tokenizer.pad(
             prompt_input_ids,
             return_tensors="pt",
