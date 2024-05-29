@@ -18,7 +18,7 @@
 # can be conditioned on reference audio or natural languge descriptions.
 
 """Train Parler-TTS using 🤗 Accelerate"""
-
+import copy
 import logging
 import os
 import random
@@ -47,7 +47,6 @@ from transformers import (
     HfArgumentParser,
 )
 from transformers.optimization import get_scheduler
-from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.utils import send_example_telemetry
 
 from parler_tts import (
@@ -222,6 +221,7 @@ def main():
         }
     )
 
+
     # create model
     model = ParlerTTSForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
@@ -230,6 +230,7 @@ def main():
         token=data_args.token,
         trust_remote_code=data_args.trust_remote_code,
     )
+
 
     # enable gradient checkpointing if necessary
     if training_args.gradient_checkpointing:
@@ -256,6 +257,7 @@ def main():
         if data_args.use_mds:
             train_dataloader = DataLoaderMDS(
                 model_args=model_args,
+                config=config,
                 data_args=data_args,
                 training_args=training_args,
                 manifest_path=data_args.mds_train_manifest_path,
@@ -307,6 +309,7 @@ def main():
         if data_args.use_mds:
             validation_dataloader = DataLoaderMDS(
                 model_args=model_args,
+                config=config,
                 data_args=data_args,
                 training_args=training_args,
                 manifest_path=data_args.mds_eval_manifest_path,
@@ -351,6 +354,7 @@ def main():
         if data_args.use_mds:
             generate_dataloader = DataLoaderMDS(
                 model_args=model_args,
+                config=config,
                 data_args=data_args,
                 training_args=training_args,
                 manifest_path=data_args.mds_generate_manifest_path,
@@ -698,6 +702,7 @@ def main():
                         eval_metric = eval_step(model, batch, accelerator, autocast_kwargs)
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metrics.append(eval_metric)
+                        break
 
                     if training_args.predict_with_generate:
                         # release eval input batch (in favour of generate)
@@ -718,6 +723,7 @@ def main():
                             generated_audios, prompts = accelerator.gather_for_metrics((generated_audios, prompts))
                             eval_preds.extend(generated_audios.to("cpu"))
                             eval_prompts.extend(prompts.to("cpu"))
+                            break
 
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
@@ -729,6 +735,7 @@ def main():
                     # compute metrics
                     metrics_desc = ""
                     if training_args.predict_with_generate:
+
                         metric_values, pred_prompts, audios, transcriptions = compute_metrics(
                             eval_preds,
                             eval_refs,

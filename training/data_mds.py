@@ -3,18 +3,28 @@ import os
 from pathlib import Path
 from typing import Optional
 import json
+import copy
 
 import numpy as np
-import streaming
 import torch
 
 import torchaudio
 from streaming import Stream, StreamingDataset, StreamingDataLoader
 
+from transformers import AutoConfig, AutoModel
+from parler_tts.dac_wrapper import DACConfig, DACModel
+from parler_tts.configuration_parler_tts import ParlerTTSConfig
+
+AutoConfig.register("dac", DACConfig)
+AutoModel.register(DACConfig, DACModel)
+
+
 from transformers import AutoTokenizer
 
 from parler_tts.modeling_parler_tts import build_delay_pattern_mask
 from training.arguments import DataTrainingArguments, ModelArguments, ParlerTTSTrainingArguments
+
+from scipy.io.wavfile import write
 
 
 def configure_aws_creds():
@@ -31,22 +41,18 @@ def gather_streams(manifest_path: str, s3_bucket_root: str, mds_cache_dir: str):
         s3_bucket_root (str): Path to s3 bucket containing the above datasets.
         mds_cache_dir (str or Path): Path to local directory to store the downloaded datasets.
     """
-
-    streaming.base.util.clean_stale_shared_memory()
-
     mds_cache_dir = Path(mds_cache_dir)
 
     with open(manifest_path, "r") as f:  # type: ignore
         dataset_names = f.read().splitlines()
     dataset_names = [dataset_name.strip() for dataset_name in dataset_names]
-    cache_dirs = [mds_cache_dir / Path(*dataset_name.split("/")) for dataset_name in dataset_names]
 
     # s3_bucket_root is, for example, s3://my-data-bucket/
     buckets = [str(s3_bucket_root + dataset_name) for dataset_name in dataset_names]
     assert len(buckets) > 0, "No datasets found in manifest."
 
-    # Should now have e.g. ["s3://my-data-bucket/dataset_name_1", "s3://my-data-bucket/dataset_name_2", etc.]
-    streams = [Stream(remote=bucket, local=cache_dir) for bucket, cache_dir in zip(buckets, cache_dirs)]
+    # Should now have e.g. ["s3://my-data-bucket/mls_eng_train_dac", "s3://my-data-bucket/mls_eng_dev_dac", etc.]
+    streams = [Stream(remote=bucket, local=mds_cache_dir / f"{bucket.split('/')[-1]}") for bucket in buckets]
 
     return streams
 
@@ -55,6 +61,7 @@ class DatasetMDS(StreamingDataset):
     def __init__(
         self,
         streams: list,
+        config: ParlerTTSConfig,
         batch_size: int,
         prompt_tokenizer: AutoTokenizer,
         audio_ref_sample_rate: int,  # audio sample rate for reference encoder, typically 16kHz
@@ -78,6 +85,9 @@ class DatasetMDS(StreamingDataset):
             #  for full list of available arguments
         )
 
+        self.audio_encoder = DACModel.from_pretrained(config.audio_encoder._name_or_path).cpu()
+
+        self.audio_encoder_sr = config.audio_encoder.sampling_rate
         self.audio_sr = audio_ref_sample_rate
         self.audio_ref_len = audio_ref_len
         self.prompt_tokenizer = prompt_tokenizer
@@ -98,7 +108,12 @@ class DatasetMDS(StreamingDataset):
         # 'whisper_max_logprob', 'whisper_min_logprob', 'whisper_sum_logprob'
 
         # Load audio (for reference embeddings)
-        audio, sr = torchaudio.load(io.BytesIO(data["flac"]), format="flac")
+        #audio, sr = torchaudio.load(io.BytesIO(data["flac"]), format="flac")
+        codes = torch.tensor(data["dac"].astype(np.int64)).unsqueeze(0).to("cpu")
+        audio = self.audio_encoder.decode(codes[None, ...], [None]).audio_values
+        audio = audio.detach()
+        sr = self.audio_encoder_sr
+
         assert audio.size(0) == 1, f"Audio must be mono, but got {audio.size(0)} channels"
 
         if sr != self.audio_sr:
@@ -123,9 +138,6 @@ class DatasetMDS(StreamingDataset):
 
         # Load DAC codes and re-arrange into the delay pattern
         labels = torch.tensor(data["dac"].astype(np.int64))
-        assert (
-            labels.size(0) == self.num_codebooks
-        ), f"Number of codebooks != specified number of codebooks ({self.num_codebooks})"
         labels = labels.unsqueeze(0)
         # add bos
         labels = torch.cat([self.bos_labels, labels], dim=-1)
@@ -163,12 +175,12 @@ class DatasetMDS(StreamingDataset):
 
         return features
 
-
 # class DataLoaderMDS(DataLoader)
 class DataLoaderMDS(StreamingDataLoader):
     def __init__(
         self,
         model_args: ModelArguments,
+        config: ParlerTTSConfig,
         data_args: DataTrainingArguments,
         training_args: ParlerTTSTrainingArguments,
         manifest_path: str,
@@ -182,6 +194,7 @@ class DataLoaderMDS(StreamingDataLoader):
     ):
         configure_aws_creds()
 
+
         streams = gather_streams(
             manifest_path=manifest_path,
             s3_bucket_root=data_args.mds_s3_bucket_root,
@@ -190,6 +203,7 @@ class DataLoaderMDS(StreamingDataLoader):
 
         dataset = DatasetMDS(
             streams=streams,
+            config=config,
             batch_size=batch_size,
             prompt_tokenizer=prompt_tokenizer,
             audio_ref_sample_rate=model_args.audio_ref_encoder_sr,
