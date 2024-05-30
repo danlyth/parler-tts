@@ -129,23 +129,7 @@ def main():
 
     accelerator.init_trackers(
         project_name=data_args.wandb_project,
-        config={
-            "learning_rate": training_args.learning_rate,
-            "model_name_or_path": model_args.model_name_or_path,
-            "num_train_epochs": training_args.num_train_epochs,
-            "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
-            "per_device_train_batch_size": training_args.per_device_train_batch_size,
-            "global_batch_size": training_args.per_device_train_batch_size * accelerator.num_processes,
-            "mixed_precision": mixed_precision,
-            "lr_scheduler_type": training_args.lr_scheduler_type,
-            "warmup_steps": training_args.warmup_steps,
-            "freeze_text_encoder": model_args.freeze_text_encoder,
-            "max_duration_in_seconds": data_args.max_duration_in_seconds,
-            "weight_decay": training_args.weight_decay,
-            "adam_beta1": training_args.adam_beta1,
-            "adam_beta2": training_args.adam_beta2,
-            "temperature": model_args.temperature,
-        },
+        config={**vars(training_args), **vars(data_args), **vars(model_args)},
     )
 
     # Setup logging
@@ -239,7 +223,7 @@ def main():
     audio_encoder_eos_token_id = config.decoder.eos_token_id
     audio_encoder_bos_token_id = model.generation_config.decoder_start_token_id
 
-    print("Loading datasets...")
+    logger.info("Loading datasets...")
     # Instantiate custom data collator
     data_collator = DataCollator(
         prompt_tokenizer=prompt_tokenizer,
@@ -432,21 +416,145 @@ def main():
         num_training_steps=total_train_steps * accelerator.num_processes,
     )
 
+    # Test the dataloaders
+    logger.info("Testing the dataloaders BEFORE preparing with accelerate")
+    if training_args.do_train:
+        logger.info(f"Number of training samples: {len(train_dataloader)}")
+        for batch in train_dataloader:
+            break
+        for key, value in batch.items():
+            logger.info("Training data example")
+            logger.info(f"{key}: {value.shape}")
+    if training_args.do_eval:
+        logger.info(f"Number of validation samples: {len(validation_dataloader)}")
+        for batch in validation_dataloader:
+            break
+        for key, value in batch.items():
+            logger.info("Validation data example")
+            logger.info(f"{key}: {value.shape}")
+    if training_args.predict_with_generate:
+        logger.info(f"Number of generation samples: {len(generate_dataloader)}")
+        for batch in generate_dataloader:
+            break
+        for key, value in batch.items():
+            logger.info("Generation data example")
+            logger.info(f"{key}: {value.shape}")
+
     # Prepare everything with accelerate
     model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
     train_dataloader = accelerator.prepare(train_dataloader)
     validation_dataloader = accelerator.prepare(validation_dataloader)
     generate_dataloader = accelerator.prepare(generate_dataloader)
 
+    # Test the dataloaders again
+    logger.info("Testing the dataloaders AFTER preparing with accelerate")
+    if training_args.do_train:
+        logger.info(f"Number of training samples: {len(train_dataloader)}")
+        for batch in train_dataloader:
+            break
+        for key, value in batch.items():
+            logger.info("Training data example")
+            logger.info(f"{key}: {value.shape}")
+    if training_args.do_eval:
+        logger.info(f"Number of validation samples: {len(validation_dataloader)}")
+        for batch in validation_dataloader:
+            break
+        for key, value in batch.items():
+            logger.info("Validation data example")
+            logger.info(f"{key}: {value.shape}")
+    if training_args.predict_with_generate:
+        logger.info(f"Number of generation samples: {len(generate_dataloader)}")
+        for batch in generate_dataloader:
+            break
+        for key, value in batch.items():
+            logger.info("Generation data example")
+            logger.info(f"{key}: {value.shape}")
+
+    # Define gradient update step fn
+    def train_step(
+        model,
+        batch,
+        accelerator,
+        autocast_kwargs,
+    ):
+        model.train()
+
+        with accelerator.autocast(autocast_handler=autocast_kwargs):
+            with torch.no_grad():  # Does autocast take care of this?
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            batch["encoder_outputs"] = encoder_outputs
+            # Size (batch_size, audio_ref length / downsampling, hidden_size)
+            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"]) # Can do this because we're not using padding
+
+        outputs = model(**batch)
+        # CE (data) loss
+        ce_loss = outputs.loss
+        metrics = {"loss": ce_loss}
+        return ce_loss, metrics
+
+    # Define eval fn
+    def eval_step(
+        model,
+        batch,
+        accelerator,
+        autocast_kwargs,
+    ):
+        if training_args.torch_compile:
+            model = model._orig_mod
+
+        model.eval()
+
+        with accelerator.autocast(autocast_handler=autocast_kwargs):
+            with torch.no_grad():
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            batch["encoder_outputs"] = encoder_outputs
+            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
+
+        with torch.no_grad():
+            outputs = model(**batch)
+        # CE (data) loss
+        ce_loss = outputs.loss
+        metrics = {"loss": ce_loss}
+
+        return metrics
+
+    def generate_step(
+        model,
+        batch,
+        accelerator,
+        autocast_kwargs,
+    ):
+        if training_args.torch_compile:
+            model = model._orig_mod
+
+        model = accelerator.unwrap_model(model, keep_fp32_wrapper=mixed_precision != "fp16")
+        model.eval()
+
+        with accelerator.autocast(autocast_handler=autocast_kwargs):
+            with torch.no_grad():
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
+            batch["encoder_outputs"] = encoder_outputs
+            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
+
+        batch.pop("audio_ref", None)
+        batch.pop("audio_ref_attention_mask", None)
+        batch.pop("decoder_attention_mask", None)
+
+        output_audios = model.generate(**batch, **gen_kwargs)
+        output_audios = accelerator.pad_across_processes(output_audios, dim=1, pad_index=0)
+        return output_audios
+
     logger.info("***** Running training *****")
-    logger.info(f"  Num samples in training dataset = {(len(train_dataloader)*train_batch_size):,}")
+    logger.info(
+        f"  Num samples in training dataset= {(len(train_dataloader) * train_batch_size * accelerator.num_processes):,}"
+    )
     logger.info(f"  Num examples = {(total_train_steps * train_batch_size * gradient_accumulation_steps):,}")
     logger.info("  Instantaneous batch size per device =" f" {per_device_train_batch_size}")
     logger.info("  Gradient accumulation steps =" f" {gradient_accumulation_steps}")
     logger.info(
         f"  Total train batch size (w. parallel & distributed) = {train_batch_size * gradient_accumulation_steps}"
     )
-    logger.info(f"  Total optimization steps = {total_train_steps}")
+    logger.info(f"  Total optimization steps = {total_train_steps:,}")
 
     # ======================== Training ================================
     train_time = 0
@@ -535,90 +643,18 @@ def main():
         "max_length": model_args.max_length,
     }
 
-    # Define gradient update step fn
-    def train_step(
-        model,
-        batch,
-        accelerator,
-        autocast_kwargs,
-    ):
-        model.train()
-
-        with accelerator.autocast(autocast_handler=autocast_kwargs):
-            with torch.no_grad():  # Does autocast take care of this?
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-            batch["encoder_outputs"] = encoder_outputs
-            # Size (batch_size, audio_ref length / downsampling, hidden_size)
-            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"]) # Can do this because we're not using padding
-
-        outputs = model(**batch)
-        # CE (data) loss
-        ce_loss = outputs.loss
-        metrics = {"loss": ce_loss}
-        return ce_loss, metrics
-
-    # Define eval fn
-    def eval_step(
-        model,
-        batch,
-        accelerator,
-        autocast_kwargs,
-    ):
-        if training_args.torch_compile:
-            model = model._orig_mod
-
-        model.eval()
-
-        with accelerator.autocast(autocast_handler=autocast_kwargs):
-            with torch.no_grad():
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-            batch["encoder_outputs"] = encoder_outputs
-            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
-
-        with torch.no_grad():
-            outputs = model(**batch)
-        # CE (data) loss
-        ce_loss = outputs.loss
-        metrics = {"loss": ce_loss}
-
-        return metrics
-
-    def generate_step(
-        model,
-        batch,
-        accelerator,
-        autocast_kwargs,
-    ):
-        if training_args.torch_compile:
-            model = model._orig_mod
-
-        model = accelerator.unwrap_model(model, keep_fp32_wrapper=mixed_precision != "fp16")
-        model.eval()
-
-        with accelerator.autocast(autocast_handler=autocast_kwargs):
-            with torch.no_grad():
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-            batch["encoder_outputs"] = encoder_outputs
-            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
-
-        batch.pop("audio_ref", None)
-        batch.pop("audio_ref_attention_mask", None)
-        batch.pop("decoder_attention_mask", None)
-
-        output_audios = model.generate(**batch, **gen_kwargs)
-        output_audios = accelerator.pad_across_processes(output_audios, dim=1, pad_index=0)
-        return output_audios
-
     for epoch in range(epochs_trained, num_epochs):
         # TODO Check the below
         if hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDataset):
             train_dataloader.dataset.set_epoch(epoch)
 
         if resume_step is not None:
+            logger.info(f"NOT skipping the first {resume_step} batches in the dataloader (very slow, revisit this)")
             # Skip the first N batches in the dataloader when resuming from a checkpoint
-            train_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+            # train_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
             resume_step = None
 
+        logger.info(f"Running training epoch {epoch}")
         for batch in train_dataloader:
             with accelerator.accumulate(model):
                 loss, train_metric = train_step(model, batch, accelerator, autocast_kwargs)
@@ -652,6 +688,7 @@ def main():
 
                 # save checkpoint and weights after each save_steps and at the end of training
                 if (cur_step % training_args.save_steps == 0) or cur_step == total_train_steps:
+                    logger.info(f"Saving checkpoint for step {cur_step} at epoch {epoch}")
                     intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}")
                     # safe_serialization=False to avoid shared tensors saving issue (TODO(YL): it's a temporary fix)
                     # https://github.com/huggingface/transformers/issues/27293#issuecomment-1872560074
@@ -668,6 +705,7 @@ def main():
                             unwrapped_model.save_pretrained(training_args.output_dir)
 
                         if training_args.push_to_hub:
+                            logger.info("Pushing to the hub...")
                             repo.push_to_hub(
                                 commit_message=f"Saving train state of step {cur_step}",
                                 blocking=False,
@@ -676,14 +714,16 @@ def main():
                 if training_args.do_eval and (
                     cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1
                 ):
-                    train_time += time.time() - train_start
+                    accelerator.wait_for_everyone()  # NOTE not sure this is required
                     # ======================== Evaluating ==============================
+                    logger.info("***** Running evaluation *****")
+                    train_time += time.time() - train_start
                     eval_metrics = []
                     eval_preds = []
                     eval_prompts = []
                     eval_start = time.time()
                     # release training input batch
-                    batch = release_memory(batch)
+                    # batch = release_memory(batch)
 
                     for batch in tqdm(
                         validation_dataloader,
@@ -697,8 +737,10 @@ def main():
                         eval_metrics.append(eval_metric)
 
                     if training_args.predict_with_generate:
+                        accelerator.wait_for_everyone()  # NOTE not sure this is required
+                        logger.info("***** Running generation *****")
                         # release eval input batch (in favour of generate)
-                        batch = release_memory(batch)
+                        # batch = release_memory(batch)
                         # generation
                         for batch in tqdm(
                             generate_dataloader,
