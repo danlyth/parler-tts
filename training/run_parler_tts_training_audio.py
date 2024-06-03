@@ -220,8 +220,8 @@ def main():
     # Freeze Encoders
     model.freeze_encoders(model_args.freeze_text_encoder)
 
-    audio_encoder_eos_token_id = config.decoder.eos_token_id
     audio_encoder_bos_token_id = model.generation_config.decoder_start_token_id
+    audio_encoder_eos_token_id = config.decoder.eos_token_id
 
     logger.info("Loading datasets...")
     # Instantiate custom data collator
@@ -232,6 +232,7 @@ def main():
         prompt_max_length=data_args.max_prompt_token_length,
         # description_max_length=data_args.max_description_token_length,
         audio_max_length=data_args.max_audio_token_length,
+        audio_ref_max_length=data_args.max_audio_ref_length,
     )
 
     if training_args.do_train:
@@ -243,6 +244,8 @@ def main():
                 manifest_path=data_args.mds_train_manifest_path,
                 batch_size=training_args.per_device_train_batch_size,
                 prompt_tokenizer=prompt_tokenizer,
+                audio_encoder_bos_token_id=audio_encoder_bos_token_id,
+                audio_encoder_eos_token_id=audio_encoder_eos_token_id,
                 shuffle=True,
                 epoch_size=data_args.max_train_samples,
                 collator=data_collator,
@@ -294,6 +297,8 @@ def main():
                 manifest_path=data_args.mds_eval_manifest_path,
                 batch_size=training_args.per_device_eval_batch_size,
                 prompt_tokenizer=prompt_tokenizer,
+                audio_encoder_bos_token_id=audio_encoder_bos_token_id,
+                audio_encoder_eos_token_id=audio_encoder_eos_token_id,
                 shuffle=False,
                 epoch_size=data_args.max_eval_samples,
                 collator=data_collator,
@@ -338,6 +343,8 @@ def main():
                 manifest_path=data_args.mds_generate_manifest_path,
                 batch_size=data_args.per_device_generate_batch_size,
                 prompt_tokenizer=prompt_tokenizer,
+                audio_encoder_bos_token_id=audio_encoder_bos_token_id,
+                audio_encoder_eos_token_id=audio_encoder_eos_token_id,
                 shuffle=False,
                 epoch_size=data_args.max_generate_samples,
                 collator=data_collator,
@@ -422,22 +429,22 @@ def main():
         logger.info(f"Number of training samples: {len(train_dataloader)}")
         for batch in train_dataloader:
             break
+        logger.info("Training data example")
         for key, value in batch.items():
-            logger.info("Training data example")
             logger.info(f"{key}: {value.shape}")
     if training_args.do_eval:
         logger.info(f"Number of validation samples: {len(validation_dataloader)}")
         for batch in validation_dataloader:
             break
+        logger.info("Validation data example")
         for key, value in batch.items():
-            logger.info("Validation data example")
             logger.info(f"{key}: {value.shape}")
     if training_args.predict_with_generate:
         logger.info(f"Number of generation samples: {len(generate_dataloader)}")
         for batch in generate_dataloader:
             break
+        logger.info("Generation data example")
         for key, value in batch.items():
-            logger.info("Generation data example")
             logger.info(f"{key}: {value.shape}")
 
     # Prepare everything with accelerate
@@ -452,22 +459,22 @@ def main():
         logger.info(f"Number of training samples: {len(train_dataloader)}")
         for batch in train_dataloader:
             break
+        logger.info("Training data example")
         for key, value in batch.items():
-            logger.info("Training data example")
             logger.info(f"{key}: {value.shape}")
     if training_args.do_eval:
         logger.info(f"Number of validation samples: {len(validation_dataloader)}")
         for batch in validation_dataloader:
             break
+        logger.info("Validation data example")
         for key, value in batch.items():
-            logger.info("Validation data example")
             logger.info(f"{key}: {value.shape}")
     if training_args.predict_with_generate:
         logger.info(f"Number of generation samples: {len(generate_dataloader)}")
         for batch in generate_dataloader:
             break
+        logger.info("Generation data example")
         for key, value in batch.items():
-            logger.info("Generation data example")
             logger.info(f"{key}: {value.shape}")
 
     # Define gradient update step fn
@@ -484,8 +491,6 @@ def main():
                 encoder_outputs = audio_ref_encoder(batch["audio_ref"])
             batch["encoder_outputs"] = encoder_outputs
             # Size (batch_size, audio_ref length / downsampling, hidden_size)
-            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"]) # Can do this because we're not using padding
-
         outputs = model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
@@ -508,8 +513,6 @@ def main():
             with torch.no_grad():
                 encoder_outputs = audio_ref_encoder(batch["audio_ref"])
             batch["encoder_outputs"] = encoder_outputs
-            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
-
         with torch.no_grad():
             outputs = model(**batch)
         # CE (data) loss
@@ -534,8 +537,6 @@ def main():
             with torch.no_grad():
                 encoder_outputs = audio_ref_encoder(batch["audio_ref"])
             batch["encoder_outputs"] = encoder_outputs
-            # batch["attention_mask"] = torch.ones_like(batch["encoder_outputs"])
-
         batch.pop("audio_ref", None)
         batch.pop("audio_ref_attention_mask", None)
         batch.pop("decoder_attention_mask", None)
