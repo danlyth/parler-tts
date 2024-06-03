@@ -44,6 +44,7 @@ from transformers import (
     AutoTokenizer,
     HfArgumentParser,
 )
+from transformers.modeling_outputs import BaseModelOutput
 from transformers.optimization import get_scheduler
 from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.utils import send_example_telemetry
@@ -53,7 +54,7 @@ from parler_tts import (
     ParlerTTSForConditionalGeneration,
 )
 from training.arguments import DataTrainingArguments, ModelArguments, ParlerTTSTrainingArguments
-from training.data_local import DataCollator, DatasetLocal
+from training.data import DataCollator, DatasetLocal
 from training.data_mds import DataLoaderMDS
 from training.eval import compute_metrics
 from training.utils import get_last_checkpoint, log_metric, log_pred, rotate_checkpoints
@@ -642,6 +643,10 @@ def main():
         "do_sample": model_args.do_sample,
         "temperature": model_args.temperature,
         "max_length": model_args.max_length,
+        # Because of the delayed pattern mask, generation might stop earlier because of unexpected behaviour
+        # on the first tokens of the codebooks that are delayed.
+        # This fix the issue.
+        "min_new_tokens": model_args.num_codebooks + 1,
     }
 
     for epoch in range(epochs_trained, num_epochs):
