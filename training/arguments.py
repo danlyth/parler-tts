@@ -87,14 +87,27 @@ class ModelArguments:
     audio_ref_encoder_sr: int = field(
         default=16000, metadata={"help": "Audio sample rate required for audio reference encoder model."}
     )
-    audio_ref_len: int = field(
-        default=3, metadata={"help": "Audio reference length in seconds."}
-    )  # TODO (Dan), change this to percent of audio duration
+    audio_ref_len: int = field(default=None, metadata={"help": "Audio reference length in seconds."})
+    audio_ref_percentage: float = field(
+        default=None, metadata={"help": "Audio reference length as a percentage of the total audio length."}
+    )
     discrete_audio_feature_sample_rate: int = field(
         default=44100,
         metadata={"help": "Sample rate that the discrete feature encoder-decoder (e.g. DAC/Encodec) operates at."},
     )
     num_codebooks: int = field(default=9, metadata={"help": "Number of codebooks in the discrete audio feature."})
+    use_perceiver: bool = field(
+        default=False, metadata={"help": "Whether to use perceiver for audio reference encoding."}
+    )
+    use_encoder_attention_mask: bool = field(
+        default=True, metadata={"help": "Whether to use encoder attention mask for audio reference encoding."}
+    )
+    audio_ref_encoder_hidden_layer: int = field(
+        default=None, metadata={"help": "Hidden layer to use for audio reference encoding."}
+    )
+    audio_ref_encoder_mean_pooling: bool = field(
+        default=False, metadata={"help": "Whether to use mean pooling for audio reference encoding."}
+    )
 
 
 @dataclass
@@ -253,15 +266,19 @@ class DataTrainingArguments:
         metadata={
             "help": (
                 "If set, filter samples with audio that are longer than `max_audio_token_length` tokens."
-                "Also, used to set maximum audio token length if `pad_to_max_length=True`."
+                "Also, used to set maximum audio token length (in token timestamps) if `pad_to_max_length=True`."
             )
         },
+    )
+    max_audio_ref_length: int = field(
+        default=None,
+        metadata={"help": ("Used to set maximum audio reference length (in seconds) if `pad_to_max_length=True`.")},
     )
     pad_to_max_length: bool = field(
         default=False,
         metadata={
             "help": (
-                "If `True`, pad audio, prompt and description to a maximum length set with respectively "
+                "If `True`, pad audio (RVQ codes), reference audio, prompt and description to a maximum length set with respectively "
                 "`max_duration_in_seconds`, `max_prompt_token_length`, `max_description_token_length`."
             )
         },
