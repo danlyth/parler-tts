@@ -2,13 +2,15 @@ import io
 import os
 from pathlib import Path
 from typing import Optional
+import json
 
 import numpy as np
 import streaming
 import torch
+
 import torchaudio
-from streaming import Stream, StreamingDataset
-from torch.utils.data import DataLoader
+from streaming import Stream, StreamingDataset, StreamingDataLoader
+
 from transformers import AutoTokenizer
 
 from parler_tts.modeling_parler_tts import build_delay_pattern_mask
@@ -89,13 +91,14 @@ class DatasetMDS(StreamingDataset):
         self.audio_encoder_bos_token_id = audio_encoder_bos_token_id
         self.audio_encoder_eos_token_id = audio_encoder_eos_token_id
         self.bos_labels = torch.ones((1, num_codebooks, 1)) * audio_encoder_bos_token_id
+        self.num_samples = 0
 
     def __len__(self):
         return super().__len__()
 
     def __getitem__(self, idx):
         data = super().__getitem__(idx)
-
+        self.num_samples += 1
         # Available keys in data:
         # 'dac', 'flac', 'length_ms', 'n_words', 'transcript', 'whisper_average_logprob',
         # 'whisper_max_logprob', 'whisper_min_logprob', 'whisper_sum_logprob'
@@ -181,7 +184,8 @@ class DatasetMDS(StreamingDataset):
         return features
 
 
-class DataLoaderMDS(DataLoader):
+# class DataLoaderMDS(DataLoader)
+class DataLoaderMDS(StreamingDataLoader):
     def __init__(
         self,
         model_args: ModelArguments,

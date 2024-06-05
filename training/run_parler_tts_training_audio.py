@@ -27,6 +27,8 @@ import sys
 import time
 from datetime import timedelta
 from pathlib import Path
+from scipy.io.wavfile import write
+import torchaudio
 
 import datasets
 import torch
@@ -254,7 +256,7 @@ def main():
             )
 
         else:
-            train_dataset_local = DatasetLocal(
+            train_dataset_locah = DatasetLocal(
                 # root_audio_dir=data_args.root_audio_dir,
                 root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
                 # root_dac_dir=data_args.root_dac_dir,
@@ -726,6 +728,7 @@ def main():
                     train_time += time.time() - train_start
                     eval_metrics = []
                     eval_preds = []
+                    eval_refs = []
                     eval_prompts = []
                     eval_start = time.time()
                     # release training input batch
@@ -754,6 +757,7 @@ def main():
                             position=2,
                             disable=not accelerator.is_local_main_process,
                         ):
+                            eval_refs.extend(batch["audio_ref"])
                             generated_audios = generate_step(model, batch, accelerator, autocast_kwargs)
                             # Gather all predictions and targets
                             generated_audios, prompts = accelerator.pad_across_processes(
@@ -775,6 +779,7 @@ def main():
                     if training_args.predict_with_generate:
                         metric_values, pred_prompts, audios, transcriptions = compute_metrics(
                             eval_preds,
+                            eval_refs,
                             eval_prompts,
                             model_args.asr_model_name_or_path,
                             data_args.per_device_generate_batch_size,
