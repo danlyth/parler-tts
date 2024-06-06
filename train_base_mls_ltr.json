@@ -1,0 +1,61 @@
+{
+    "model_name_or_path": "/ephemeral_volume/ramon/tts/parler-tts/parler-tts-untrained-600M/parler-tts-untrained-600M",
+    "save_to_disk": "/ephemeral_volume/ramon/tts/cache_parler-tts/ramontest/tmp_dataset_audio/",
+    "temporary_save_to_disk": "/ephemeral_volume/ramon/tts/cache_parler-tts/ramontest/tmp_disk",
+
+    "description_tokenizer_name": "google/flan-t5-base",
+    "prompt_tokenizer_name": "google/flan-t5-base",
+    "audio_ref_encoder_name": "microsoft/wavlm-base-plus",
+
+    "discrete_audio_feature_sample_rate": 44100,
+
+    "report_to": ["wandb"],
+    "wandb_project": "parler-tts_base_spk_sim_and_dacstream",
+    "overwrite_output_dir": false,
+    "output_dir": "/ephemeral_volume/ramon/tts/exp_parler-tts/spk_sim_and_dacstream",
+    
+    "use_mds": true,
+    "mds_s3_bucket_root": "s3://sesame-ml-datasets/",
+    "mds_train_manifest_path": "./mls_ltr_train.txt",
+    "mds_eval_manifest_path": "./mls_ltr_dev.txt",
+    "mds_generate_manifest_path": "./mls_ltr_test.txt",
+    "mds_cache_dir": "/ephemeral_volume/ramon/tts/cache_parler-tts/ramontest",
+    "mds_cache_limit": "15tb",
+
+    "audio_ref_len": 3,
+    
+    "preprocessing_num_workers": 8,
+    
+    "do_train": true,
+    "num_train_epochs": 40,
+    "gradient_accumulation_steps": 24,
+    "gradient_checkpointing": false,
+    "per_device_train_batch_size": 1,
+    "learning_rate": 1e-3,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.99,
+    "weight_decay": 0.01,
+    
+    "lr_scheduler_type": "constant_with_warmup",
+    "warmup_steps": 20000,
+    
+    "logging_steps": 10,
+    "freeze_text_encoder": true,
+    
+    "do_eval": true,
+    "evaluation_strategy": "steps",
+    "eval_steps": 1000,
+    "per_device_eval_batch_size": 8,
+    
+    "predict_with_generate": true,
+    "add_audio_samples_to_wandb": true,
+    
+    "include_inputs_for_metrics": true,
+    "save_steps": 1000,
+    
+    "audio_encoder_per_device_batch_size": 24,
+    "dtype": "bfloat16",
+    "seed": 456,
+    
+    "dataloader_num_workers": 12
+}
