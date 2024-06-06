@@ -55,7 +55,7 @@ from parler_tts import (
     ParlerTTSForConditionalGeneration,
 )
 from training.arguments import DataTrainingArguments, ModelArguments, ParlerTTSTrainingArguments
-from training.data_local_staging import DataCollator, DatasetLocal
+from training.data_local import DataCollator, DatasetLocal
 from training.data_mds import DataLoaderMDS
 from training.eval_staging import compute_metrics
 from training.utils import get_last_checkpoint, log_metric, log_pred, rotate_checkpoints
