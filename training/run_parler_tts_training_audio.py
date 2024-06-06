@@ -27,6 +27,7 @@ import sys
 import time
 from datetime import timedelta
 from pathlib import Path
+import warnings
 
 import datasets
 import torch
@@ -141,6 +142,9 @@ def main():
     )
     logger.setLevel(logging.INFO if accelerator.is_main_process else logging.WARN)
 
+    if not accelerator.is_main_process:
+        warnings.filterwarnings("ignore")  # TODO, perhaps duplicating here
+
     # Log a small summary on each proces
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
@@ -183,9 +187,11 @@ def main():
         prompt_tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
     # load audio reference encoder
-    audio_ref_encoder = AutoModel.from_pretrained(model_args.audio_ref_encoder_name)
+    audio_ref_encoder = AutoModel.from_pretrained(model_args.audio_ref_encoder_name, output_hidden_states=True)
     audio_ref_encoder.to(training_args.device)
     audio_ref_encoder.eval()
+    if model_args.audio_ref_encoder_hidden_layer is not None:
+        logger.info(f"Using hidden layer {model_args.audio_ref_encoder_hidden_layer}")
 
     # 3. Next, let's load the config.
     config = ParlerTTSConfig.from_pretrained(
@@ -256,11 +262,11 @@ def main():
         else:
             train_dataset_local = DatasetLocal(
                 # root_audio_dir=data_args.root_audio_dir,
-                root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
+                root_audio_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed",
                 # root_dac_dir=data_args.root_dac_dir,
-                root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
+                root_dac_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes/24khz_cz2048_nc10",
                 # metadata_path=data_args.train_metadata_path,
-                metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/train_local.tsv",
+                metadata_path="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/train_local.tsv",
                 prompt_tokenizer=prompt_tokenizer,
                 audio_sr=model_args.audio_ref_encoder_sr,  # TODO (Dan) remove these three lines of hard-coding
                 audio_ref_len=model_args.audio_ref_len,
@@ -309,11 +315,11 @@ def main():
         else:
             valid_dataset_local = DatasetLocal(
                 # root_audio_dir=data_args.root_audio_dir,
-                root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
+                root_audio_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed",
                 # root_dac_dir=data_args.root_dac_dir,
-                root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
+                root_dac_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes/24khz_cz2048_nc10",
                 # metadata_path=data_args.eval_metadata_path,
-                metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/dev_local.tsv",
+                metadata_path="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/dev_local.tsv",
                 prompt_tokenizer=prompt_tokenizer,
                 audio_sr=model_args.audio_ref_encoder_sr,  # TODO (Dan) remove all this hard-coding
                 audio_ref_len=model_args.audio_ref_len,
@@ -354,11 +360,11 @@ def main():
         else:
             generate_dataset_local = DatasetLocal(
                 # root_audio_dir=data_args.root_audio_dir,
-                root_audio_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed",
+                root_audio_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed",
                 # root_dac_dir=data_args.root_dac_dir,
-                root_dac_dir="/data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes",
+                root_dac_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes/24khz_cz2048_nc10",
                 # metadata_path=data_args.eval_metadata_path,
-                metadata_path="/data/expresso/audio_48khz_short_chunks_ex02_processed/test_local.tsv",
+                metadata_path="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/test_local.tsv",
                 prompt_tokenizer=prompt_tokenizer,
                 audio_sr=model_args.audio_ref_encoder_sr,  # TODO (Dan) remove all this hard-coding
                 audio_ref_len=model_args.audio_ref_len,
@@ -479,6 +485,40 @@ def main():
             logger.info(f"{key}: {value.shape}")
 
     # Define gradient update step fn
+
+    def get_ref_embeddings(batch, accelerator):
+        with accelerator.autocast(autocast_handler=autocast_kwargs):
+            with torch.no_grad():
+                encoder_outputs = audio_ref_encoder(batch["audio_ref"], batch["audio_ref_attention_mask"])
+            if model_args.audio_ref_encoder_hidden_layer is not None:
+                hidden_layer = model_args.audio_ref_encoder_hidden_layer
+                encoder_outputs = encoder_outputs.hidden_states[hidden_layer]
+            else:
+                encoder_outputs = encoder_outputs.last_hidden_state
+            if model_args.audio_ref_encoder_mean_pooling:
+                encoder_outputs = torch.mean(encoder_outputs, dim=1)
+            encoder_outputs = BaseModelOutput(encoder_outputs)
+            # Size of encoder_outputs.last_hidden_state is (batch_size, audio_ref length / downsampling, hidden_size)
+            # Check that batch["attention_mask"] is the size as encoder_outputs and crop/pad as necessary
+            if "attention_mask" in batch and not model_args.audio_ref_encoder_mean_pooling:
+                attention_mask = batch["attention_mask"]
+                encoder_outputs_len = encoder_outputs.last_hidden_state.size(1)
+                attention_mask_len = attention_mask.size(1)
+                # attention_mask shape is (batch_size, 1, audio_ref length / downsampling)
+                if encoder_outputs_len < attention_mask_len:
+                    attention_mask = attention_mask[:, :encoder_outputs_len]
+                if encoder_outputs_len > attention_mask_len:
+                    pad_length = encoder_outputs_len - attention_mask_len
+                    pad = torch.zeros(attention_mask.size(0), pad_length, device=accelerator.device)
+                    attention_mask = torch.cat([attention_mask, pad], dim=-1)
+            # elif model_args.audio_ref_encoder_mean_pooling:
+            #     logger.info("Using simple attention mask (due to mean pooling)")
+            #     # attention_mask = torch.ones(encoder_outputs.last_hidden_state.size(0), 1, device=accelerator.device)
+            #     attention_mask = None
+            else:
+                attention_mask = None
+        return encoder_outputs, attention_mask
+
     def train_step(
         model,
         batch,
@@ -487,11 +527,10 @@ def main():
     ):
         model.train()
 
-        with accelerator.autocast(autocast_handler=autocast_kwargs):
-            with torch.no_grad():  # Does autocast take care of this?
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-            batch["encoder_outputs"] = encoder_outputs
-            # Size (batch_size, audio_ref length / downsampling, hidden_size)
+        encoder_outputs, attention_mask = get_ref_embeddings(batch, accelerator)
+        batch["encoder_outputs"] = encoder_outputs
+        batch["attention_mask"] = attention_mask
+
         outputs = model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
@@ -510,10 +549,10 @@ def main():
 
         model.eval()
 
-        with accelerator.autocast(autocast_handler=autocast_kwargs):
-            with torch.no_grad():
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-            batch["encoder_outputs"] = encoder_outputs
+        encoder_outputs, attention_mask = get_ref_embeddings(batch, accelerator)
+        batch["encoder_outputs"] = encoder_outputs
+        batch["attention_mask"] = attention_mask
+
         with torch.no_grad():
             outputs = model(**batch)
         # CE (data) loss
@@ -534,17 +573,17 @@ def main():
         model = accelerator.unwrap_model(model, keep_fp32_wrapper=mixed_precision != "fp16")
         model.eval()
 
-        with accelerator.autocast(autocast_handler=autocast_kwargs):
-            with torch.no_grad():
-                encoder_outputs = audio_ref_encoder(batch["audio_ref"])
-            batch["encoder_outputs"] = encoder_outputs
-        batch.pop("audio_ref", None)
+        encoder_outputs, attention_mask = get_ref_embeddings(batch, accelerator)
+        batch["encoder_outputs"] = encoder_outputs
+        batch["attention_mask"] = attention_mask
+
+        audio_refs = batch.pop("audio_ref", None)
         batch.pop("audio_ref_attention_mask", None)
         batch.pop("decoder_attention_mask", None)
 
         output_audios = model.generate(**batch, **gen_kwargs)
         output_audios = accelerator.pad_across_processes(output_audios, dim=1, pad_index=0)
-        return output_audios
+        return output_audios, audio_refs
 
     logger.info("***** Running training *****")
     logger.info(
@@ -557,7 +596,14 @@ def main():
         f"  Total train batch size (w. parallel & distributed) = {train_batch_size * gradient_accumulation_steps}"
     )
     logger.info(f"  Total optimization steps = {total_train_steps:,}")
-
+    if "attention_mask" in batch and not model_args.audio_ref_encoder_mean_pooling:
+        logger.info("  Using attention mask for audio ref encoder")
+    else:
+        logger.info("  Not using attention mask for audio ref encoder")
+    if model_args.audio_ref_encoder_hidden_layer is not None:
+        logger.info(f"  Using hidden layer {model_args.audio_ref_encoder_hidden_layer} for audio ref encoder")
+    if model_args.audio_ref_encoder_mean_pooling:
+        logger.info("  Using mean pooling for audio ref encoder")
     # ======================== Training ================================
     train_time = 0
     train_start = time.time()
@@ -717,6 +763,7 @@ def main():
                                 blocking=False,
                             )
 
+                # if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps):
                 if training_args.do_eval and (
                     cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1
                 ):
@@ -726,10 +773,11 @@ def main():
                     train_time += time.time() - train_start
                     eval_metrics = []
                     eval_preds = []
+                    eval_refs = []
                     eval_prompts = []
                     eval_start = time.time()
                     # release training input batch
-                    # batch = release_memory(batch)
+                    batch = release_memory(batch)
 
                     for batch in tqdm(
                         validation_dataloader,
@@ -743,10 +791,11 @@ def main():
                         eval_metrics.append(eval_metric)
 
                     if training_args.predict_with_generate:
+                        generation_count = 0
                         accelerator.wait_for_everyone()  # NOTE not sure this is required
                         logger.info("***** Running generation *****")
                         # release eval input batch (in favour of generate)
-                        # batch = release_memory(batch)
+                        batch = release_memory(batch)
                         # generation
                         for batch in tqdm(
                             generate_dataloader,
@@ -754,14 +803,18 @@ def main():
                             position=2,
                             disable=not accelerator.is_local_main_process,
                         ):
-                            generated_audios = generate_step(model, batch, accelerator, autocast_kwargs)
+                            generated_audios, audio_refs = generate_step(model, batch, accelerator, autocast_kwargs)
                             # Gather all predictions and targets
                             generated_audios, prompts = accelerator.pad_across_processes(
                                 (generated_audios, batch["prompt_input_ids"]), dim=1, pad_index=0
                             )
                             generated_audios, prompts = accelerator.gather_for_metrics((generated_audios, prompts))
-                            eval_preds.extend(generated_audios.to("cpu"))
+                            eval_preds.extend(generated_audios)
                             eval_prompts.extend(prompts.to("cpu"))
+                            eval_refs.extend(audio_refs)
+                            generation_count += len(generated_audios)
+                            if generation_count >= 100:  # TODO remove hard-coded value (wandb can only do 100)
+                                break
 
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
@@ -773,8 +826,10 @@ def main():
                     # compute metrics
                     metrics_desc = ""
                     if training_args.predict_with_generate:
+                        # Just use the main process to compute the metrics
                         metric_values, pred_prompts, audios, transcriptions = compute_metrics(
                             eval_preds,
+                            eval_refs,
                             eval_prompts,
                             model_args.asr_model_name_or_path,
                             data_args.per_device_generate_batch_size,
