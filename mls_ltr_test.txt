@@ -1,3 +1,0 @@
-mls_eng_test
-libritts_r_test.clean
-libritts_r_test.other

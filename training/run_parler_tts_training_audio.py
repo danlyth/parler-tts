@@ -27,8 +27,6 @@ import sys
 import time
 from datetime import timedelta
 from pathlib import Path
-from scipy.io.wavfile import write
-import torchaudio
 
 import datasets
 import torch
@@ -702,7 +700,6 @@ def main():
                         eval_metric = eval_step(model, batch, accelerator, autocast_kwargs)
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metrics.append(eval_metric)
-                        break
 
                     if training_args.predict_with_generate:
                         # release eval input batch (in favour of generate)
@@ -723,7 +720,6 @@ def main():
                             generated_audios, prompts = accelerator.gather_for_metrics((generated_audios, prompts))
                             eval_preds.extend(generated_audios.to("cpu"))
                             eval_prompts.extend(prompts.to("cpu"))
-                            break
 
                     eval_time = time.time() - eval_start
                     # normalize eval metrics

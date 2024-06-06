@@ -109,6 +109,8 @@ class DatasetMDS(StreamingDataset):
 
         # Load audio (for reference embeddings)
         #audio, sr = torchaudio.load(io.BytesIO(data["flac"]), format="flac")
+
+
         codes = torch.tensor(data["dac"].astype(np.int64)).unsqueeze(0).to("cpu")
         audio = self.audio_encoder.decode(codes[None, ...], [None]).audio_values
         audio = audio.detach()
