@@ -171,12 +171,13 @@ tags
 .ruff_cache
 
 #ramon' files
-debug.json  
-mls_ltr_dev.txt  
-mls_ltr_test.txt  
-mls_ltr_train.txt  
-run.sh  
-test.json  
-train_base_mls_ltr.json
+./debug.json  
+./mls_ltr_dev.txt  
+./mls_ltr_test.txt  
+./mls_ltr_train.txt  
+./run.sh  
+./test.json  
+./train_base_mls_ltr.json
+./cache
 
 wandb
