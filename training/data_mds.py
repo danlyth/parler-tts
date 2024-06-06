@@ -64,11 +64,12 @@ class DatasetMDS(StreamingDataset):
         config: ParlerTTSConfig,
         batch_size: int,
         prompt_tokenizer: AutoTokenizer,
-        audio_ref_sample_rate: int,  # audio sample rate for reference encoder, typically 16kHz
-        audio_ref_len: int,  # audio reference length (in seconds) for reference encoder
         num_codebooks: int,  # number of codebooks in the DAC features
-        audio_encoder_bos_token_id: int = 1025,  # BOS token id for audio encoder
-        audio_encoder_eos_token_id: int = 1024,  # EOS token id for audio encoder
+        audio_ref_sample_rate: int,  # audio sample rate for reference encoder, typically 16kHz
+        audio_ref_len: Optional[int] = None,  # audio reference length (in seconds) for reference encoder
+        audio_ref_percentage: Optional[float] = None,  # percentage of audio to use for reference encoder
+        audio_encoder_bos_token_id: int = None,  # BOS token id for audio encoder
+        audio_encoder_eos_token_id: int = None,  # EOS token id for audio encoder
         **kwargs,
     ):
         super().__init__(
@@ -90,8 +91,13 @@ class DatasetMDS(StreamingDataset):
         self.audio_encoder_sr = config.audio_encoder.sampling_rate
         self.audio_sr = audio_ref_sample_rate
         self.audio_ref_len = audio_ref_len
+        self.audio_ref_percentage = audio_ref_percentage
         self.prompt_tokenizer = prompt_tokenizer
         self.num_codebooks = num_codebooks
+        if audio_encoder_bos_token_id is None:
+            raise ValueError("audio_encoder_bos_token_id must be provided")
+        if audio_encoder_eos_token_id is None:
+            raise ValueError("audio_encoder_eos_token_id must be provided")
         self.audio_encoder_bos_token_id = audio_encoder_bos_token_id
         self.audio_encoder_eos_token_id = audio_encoder_eos_token_id
         self.bos_labels = torch.ones((1, num_codebooks, 1)) * audio_encoder_bos_token_id
@@ -125,18 +131,32 @@ class DatasetMDS(StreamingDataset):
         # Creating a reference audio segment of fixed length (audio_ref_len)
         audio = audio.squeeze()
 
-        # Check and pad if audio is shorter than required length
-        if audio.size(0) < self.audio_sr * self.audio_ref_len:
-            pad = torch.zeros(self.audio_sr * self.audio_ref_len - audio.size(0))
-            audio = torch.cat([audio, pad])
+        audio_len = audio.size(0)
 
-        # Check to ensure there's enough audio to select a segment
-        if audio.size(0) > self.audio_sr * self.audio_ref_len:
-            start = torch.randint(0, audio.size(0) - self.audio_sr * self.audio_ref_len, (1,)).item()
-        else:
-            start = 0  # Default to start at 0 if exactly the required length or error handled above
+        # Select a segment of audio to use
+        if self.audio_ref_len and self.audio_ref_percentage:
+            raise ValueError("Cannot specify both audio_ref_len and audio_ref_percentage")
 
-        audio = audio[start : start + self.audio_sr * self.audio_ref_len]
+        if not self.audio_ref_len and not self.audio_ref_percentage:
+            raise ValueError("Must specify either audio_ref_len or audio_ref_percentage")
+
+        if self.audio_ref_len is not None:
+            # Check and pad if audio is shorter than required length
+            if audio_len < self.audio_sr * self.audio_ref_len:
+                pad = torch.zeros(self.audio_sr * self.audio_ref_len - audio.size(0))
+                audio = torch.cat([audio, pad])
+
+            if audio_len > self.audio_sr * self.audio_ref_len:
+                start = torch.randint(0, audio_len - self.audio_sr * self.audio_ref_len, (1,)).item()
+            else:
+                start = 0  # Default to start at 0 if exactly the required length or error handled above
+
+            audio = audio[start : start + self.audio_sr * self.audio_ref_len]
+
+        elif self.audio_ref_percentage is not None:
+            audio_ref_len = int(audio_len * self.audio_ref_percentage)
+            start = torch.randint(0, audio_len - audio_ref_len, (1,)).item()  # (1,) - single random integer
+            audio = audio[start : start + audio_ref_len]
 
         # Load DAC codes and re-arrange into the delay pattern
         labels = torch.tensor(data["dac"].astype(np.int64))
@@ -188,6 +208,8 @@ class DataLoaderMDS(StreamingDataLoader):
         manifest_path: str,
         batch_size: int,
         prompt_tokenizer: AutoTokenizer,
+        audio_encoder_bos_token_id: int,
+        audio_encoder_eos_token_id: int,
         shuffle: bool,
         collator: callable,  # TODO: Define this more specifically if possible
         drop_last: bool,
@@ -208,9 +230,12 @@ class DataLoaderMDS(StreamingDataLoader):
             config=config,
             batch_size=batch_size,
             prompt_tokenizer=prompt_tokenizer,
+            num_codebooks=model_args.num_codebooks,
             audio_ref_sample_rate=model_args.audio_ref_encoder_sr,
             audio_ref_len=model_args.audio_ref_len,
-            num_codebooks=model_args.num_codebooks,
+            audio_ref_percentage=model_args.audio_ref_percentage,
+            audio_encoder_bos_token_id=audio_encoder_bos_token_id,
+            audio_encoder_eos_token_id=audio_encoder_eos_token_id,
             shuffle=shuffle,  # IterableDataset so we shuffle here rather than in DataLoader
             cache_limit=data_args.mds_cache_limit,
             epoch_size=epoch_size,

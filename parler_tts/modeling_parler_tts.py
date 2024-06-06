@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch ParlerTTS model."""
+"""PyTorch ParlerTTS model."""
+
 import copy
 import inspect
 import math
@@ -1155,7 +1156,7 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
             labels = labels.masked_fill(labels == self.config.bos_token_id, -100)
 
             # we use every codebooks token AND one single EOS at the end of each codebooks
-            mask = (input_ids.transpose(1, 2) != self.config.eos_token_id) & ((labels != -100))
+            mask = (input_ids.transpose(1, 2) != self.config.eos_token_id) & (labels != -100)
 
             # per codebook cross-entropy
             for codebook in range(self.config.num_codebooks):
@@ -2003,7 +2004,7 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
             and self.decoder.config.cross_attention_hidden_size is None
         ):
             encoder_hidden_states = self.enc_to_dec_proj(encoder_hidden_states)
-        
+
         if attention_mask is not None:
             encoder_hidden_states = encoder_hidden_states * attention_mask[..., None]
 

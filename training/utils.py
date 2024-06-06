@@ -6,6 +6,7 @@ from dataclasses import field
 from typing import Dict, List
 
 import torch
+import torchaudio
 from wandb import Audio
 
 
@@ -60,6 +61,41 @@ def rotate_checkpoints(save_total_limit=None, output_dir=None, checkpoint_prefix
         shutil.rmtree(checkpoint, ignore_errors=True)
 
 
+def normalize_loudness(
+    wav: torch.Tensor,
+    sample_rate: int,
+    loudness_headroom_db: float = 14,
+    loudness_compressor: bool = False,
+    energy_floor: float = 2e-3,
+):
+    """Normalize an input signal to a user loudness in dB LKFS.
+    Audio loudness is defined according to the ITU-R BS.1770-4 recommendation.
+    Adapted from https://github.com/facebookresearch/audiocraft/blob/72cb16f9fb239e9cf03f7bd997198c7d7a67a01c/audiocraft/data/audio_utils.py#L57
+
+    Args:
+        wav (torch.Tensor): Input multichannel audio data.
+        sample_rate (int): Sample rate.
+        loudness_headroom_db (float): Target loudness of the output in dB LUFS.
+        loudness_compressor (bool): Uses tanh for soft clipping.
+        energy_floor (float): anything below that RMS level will not be rescaled.
+    Returns:
+        torch.Tensor: Loudness normalized output data.
+    """
+    energy = wav.pow(2).mean().sqrt().item()
+    if energy < energy_floor:
+        return wav
+    transform = torchaudio.transforms.Loudness(sample_rate)
+    input_loudness_db = transform(wav).item()
+    # calculate the gain needed to scale to the desired loudness level
+    delta_loudness = -loudness_headroom_db - input_loudness_db
+    gain = 10.0 ** (delta_loudness / 20.0)
+    output = gain * wav
+    if loudness_compressor:
+        output = torch.tanh(output)
+    assert output.isfinite().all(), (input_loudness_db, wav.pow(2).mean().sqrt())
+    return output
+
+
 def log_metric(
     accelerator,
     metrics: Dict,
@@ -108,6 +144,10 @@ def log_pred(
             commit=False,
         )
 
+        audios = [
+            normalize_loudness(audio.unsqueeze(0), sample_rate=sampling_rate, loudness_headroom_db=22).squeeze().cpu()
+            for audio in audios
+        ]
         # wandb can only loads 100 audios per step
         wandb_tracker.log(
             {
