@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch ParlerTTS model."""
+"""PyTorch ParlerTTS model."""
+
 import copy
 import inspect
 import math
@@ -1155,7 +1156,7 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
             labels = labels.masked_fill(labels == self.config.bos_token_id, -100)
 
             # we use every codebooks token AND one single EOS at the end of each codebooks
-            mask = (input_ids.transpose(1, 2) != self.config.eos_token_id) & ((labels != -100))
+            mask = (input_ids.transpose(1, 2) != self.config.eos_token_id) & (labels != -100)
 
             # per codebook cross-entropy
             for codebook in range(self.config.num_codebooks):
@@ -1386,8 +1387,6 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
         batch_size = input_ids.shape[0] // self.num_codebooks
 
         # 4. Define other model kwargs
-        model_kwargs["output_attentions"] = generation_config.output_attentions
-        model_kwargs["output_hidden_states"] = generation_config.output_hidden_states
         model_kwargs["use_cache"] = generation_config.use_cache
         model_kwargs["guidance_scale"] = generation_config.guidance_scale
 
@@ -1481,14 +1480,11 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
                 )
 
             # 11. run greedy search
-            outputs = self.greedy_search(
+            outputs = self._greedy_search(
                 input_ids,
                 logits_processor=logits_processor,
                 stopping_criteria=stopping_criteria,
-                pad_token_id=generation_config.pad_token_id,
-                eos_token_id=generation_config.eos_token_id,
-                output_scores=generation_config.output_scores,
-                return_dict_in_generate=generation_config.return_dict_in_generate,
+                generation_config=generation_config,
                 synced_gpus=synced_gpus,
                 streamer=streamer,
                 **model_kwargs,
@@ -1506,15 +1502,12 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
             )
 
             # 12. run sample
-            outputs = self.sample(
+            outputs = self._sample(
                 input_ids,
                 logits_processor=logits_processor,
                 logits_warper=logits_warper,
                 stopping_criteria=stopping_criteria,
-                pad_token_id=generation_config.pad_token_id,
-                eos_token_id=generation_config.eos_token_id,
-                output_scores=generation_config.output_scores,
-                return_dict_in_generate=generation_config.return_dict_in_generate,
+                generation_config=generation_config,
                 synced_gpus=synced_gpus,
                 streamer=streamer,
                 **model_kwargs,
@@ -1530,7 +1523,7 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
             output_ids = outputs.sequences
         else:
             output_ids = outputs
-            
+
         # apply the pattern mask to the final ids
         output_ids = self.apply_delay_pattern_mask(output_ids, model_kwargs["delay_pattern_mask"])
 
@@ -1921,7 +1914,6 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
             text_encoder.config, audio_encoder.config, decoder.config, **kwargs
         )
         return cls(text_encoder=text_encoder, audio_encoder=audio_encoder, decoder=decoder, config=config)
-
     @add_start_docstrings_to_model_forward(MUSICGEN_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=Seq2SeqLMOutput, config_class=_CONFIG_FOR_DOC)
     def forward(
@@ -2198,8 +2190,8 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
         self,
         inputs_tensor: torch.Tensor,
         model_kwargs,
-        model_input_name: Optional[str] = None,
-        guidance_scale: Optional[float] = None,
+        model_input_name: Optional[str],
+        generation_config: GenerationConfig,
     ) -> Dict[str, Any]:
         # 1. get text encoder
         encoder = self.get_text_encoder()
@@ -2221,6 +2213,9 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
             encoder_kwargs = {
                 argument: value for argument, value in encoder_kwargs.items() if argument in encoder_signature
             }
+        encoder_kwargs["output_attentions"] = generation_config.output_attentions
+        encoder_kwargs["output_hidden_states"] = generation_config.output_hidden_states
+        guidance_scale = generation_config.guidance_scale
 
         # 3. make sure that encoder returns `ModelOutput`
         model_input_name = model_input_name if model_input_name is not None else self.text_encoder.main_input_name
@@ -2452,8 +2447,6 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
         batch_size = inputs_tensor.shape[0]
 
         # 4. Define other model kwargs
-        model_kwargs["output_attentions"] = generation_config.output_attentions
-        model_kwargs["output_hidden_states"] = generation_config.output_hidden_states
         model_kwargs["use_cache"] = generation_config.use_cache
         model_kwargs["guidance_scale"] = generation_config.guidance_scale
 
@@ -2470,7 +2463,7 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
                 inputs_tensor,
                 model_kwargs,
                 model_input_name,
-                guidance_scale=generation_config.guidance_scale,
+                generation_config,
             )
 
         if "prompt_hidden_states" not in model_kwargs and "prompt_input_ids" in model_kwargs:
@@ -2579,14 +2572,11 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
                 )
 
             # 11. run greedy search
-            outputs = self.greedy_search(
+            outputs = self._greedy_search(
                 input_ids,
                 logits_processor=logits_processor,
                 stopping_criteria=stopping_criteria,
-                pad_token_id=generation_config.pad_token_id,
-                eos_token_id=generation_config.eos_token_id,
-                output_scores=generation_config.output_scores,
-                return_dict_in_generate=generation_config.return_dict_in_generate,
+                generation_config=generation_config,
                 synced_gpus=synced_gpus,
                 streamer=streamer,
                 **model_kwargs,
@@ -2605,15 +2595,12 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
             )
 
             # 12. run sample
-            outputs = self.sample(
+            outputs = self._sample(
                 input_ids,
                 logits_processor=logits_processor,
                 logits_warper=logits_warper,
                 stopping_criteria=stopping_criteria,
-                pad_token_id=generation_config.pad_token_id,
-                eos_token_id=generation_config.eos_token_id,
-                output_scores=generation_config.output_scores,
-                return_dict_in_generate=generation_config.return_dict_in_generate,
+                generation_config=generation_config,
                 synced_gpus=synced_gpus,
                 streamer=streamer,
                 **model_kwargs,
