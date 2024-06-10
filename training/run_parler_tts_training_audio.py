@@ -125,7 +125,8 @@ def main():
         mixed_precision=mixed_precision,
         log_with=training_args.report_to,
         project_dir=training_args.output_dir,
-        dispatch_batches=False,  # TODO (Dan) testing this as our batches are not all the same length
+        # dispatch_batches=False,  # TODO (Dan) testing this as our batches are not all the same length # NOTE commenteing this out as a test
+        # split_batches=True,  # NOTE testing this
         kwargs_handlers=kwargs_handlers,
     )
 
@@ -431,7 +432,7 @@ def main():
     )
 
     # Test the dataloaders
-    logger.info("Testing the dataloaders BEFORE preparing with accelerate")
+    logger.info("Testing dataloaders")
     if training_args.do_train:
         logger.info(f"Number of training samples: {len(train_dataloader)}")
         for batch in train_dataloader:
@@ -455,34 +456,35 @@ def main():
             logger.info(f"{key}: {value.shape}")
 
     # Prepare everything with accelerate
+    logger.info("Preparing model, optimizer and scheduler with accelerate")
     model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
-    train_dataloader = accelerator.prepare(train_dataloader)
-    validation_dataloader = accelerator.prepare(validation_dataloader)
-    generate_dataloader = accelerator.prepare(generate_dataloader)
+    # train_dataloader = accelerator.prepare(train_dataloader)
+    # validation_dataloader = accelerator.prepare(validation_dataloader)
+    # generate_dataloader = accelerator.prepare(generate_dataloader)
 
-    # Test the dataloaders again
-    logger.info("Testing the dataloaders AFTER preparing with accelerate")
-    if training_args.do_train:
-        logger.info(f"Number of training samples: {len(train_dataloader)}")
-        for batch in train_dataloader:
-            break
-        logger.info("Training data example")
-        for key, value in batch.items():
-            logger.info(f"{key}: {value.shape}")
-    if training_args.do_eval:
-        logger.info(f"Number of validation samples: {len(validation_dataloader)}")
-        for batch in validation_dataloader:
-            break
-        logger.info("Validation data example")
-        for key, value in batch.items():
-            logger.info(f"{key}: {value.shape}")
-    if training_args.predict_with_generate:
-        logger.info(f"Number of generation samples: {len(generate_dataloader)}")
-        for batch in generate_dataloader:
-            break
-        logger.info("Generation data example")
-        for key, value in batch.items():
-            logger.info(f"{key}: {value.shape}")
+    # # Test the dataloaders again
+    # logger.info("Testing the dataloaders AFTER preparing with accelerate")
+    # if training_args.do_train:
+    #     logger.info(f"Number of training samples: {len(train_dataloader)}")
+    #     for batch in train_dataloader:
+    #         break
+    #     logger.info("Training data example")
+    #     for key, value in batch.items():
+    #         logger.info(f"{key}: {value.shape}")
+    # if training_args.do_eval:
+    #     logger.info(f"Number of validation samples: {len(validation_dataloader)}")
+    #     for batch in validation_dataloader:
+    #         break
+    #     logger.info("Validation data example")
+    #     for key, value in batch.items():
+    #         logger.info(f"{key}: {value.shape}")
+    # if training_args.predict_with_generate:
+    #     logger.info(f"Number of generation samples: {len(generate_dataloader)}")
+    #     for batch in generate_dataloader:
+    #         break
+    #     logger.info("Generation data example")
+    #     for key, value in batch.items():
+    #         logger.info(f"{key}: {value.shape}")
 
     # Define gradient update step fn
 
@@ -505,16 +507,13 @@ def main():
                 encoder_outputs_len = encoder_outputs.last_hidden_state.size(1)
                 attention_mask_len = attention_mask.size(1)
                 # attention_mask shape is (batch_size, 1, audio_ref length / downsampling)
+                # however, this mask isn't always exactly the same length as the encoder_outputs
                 if encoder_outputs_len < attention_mask_len:
                     attention_mask = attention_mask[:, :encoder_outputs_len]
                 if encoder_outputs_len > attention_mask_len:
                     pad_length = encoder_outputs_len - attention_mask_len
                     pad = torch.zeros(attention_mask.size(0), pad_length, device=accelerator.device)
                     attention_mask = torch.cat([attention_mask, pad], dim=-1)
-            # elif model_args.audio_ref_encoder_mean_pooling:
-            #     logger.info("Using simple attention mask (due to mean pooling)")
-            #     # attention_mask = torch.ones(encoder_outputs.last_hidden_state.size(0), 1, device=accelerator.device)
-            #     attention_mask = None
             else:
                 attention_mask = None
         return encoder_outputs, attention_mask
@@ -525,12 +524,20 @@ def main():
         accelerator,
         autocast_kwargs,
     ):
+        logger.info("Training step")
         model.train()
 
+        # TODO - move this "to device" eleswhere
+        logger.info("putting batch into device")
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                batch[k] = v.to(accelerator.device)
+        logger.info("getting reference embeddings")
         encoder_outputs, attention_mask = get_ref_embeddings(batch, accelerator)
         batch["encoder_outputs"] = encoder_outputs
         batch["attention_mask"] = attention_mask
 
+        logger.info("running model")
         outputs = model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
@@ -548,6 +555,10 @@ def main():
             model = model._orig_mod
 
         model.eval()
+        # TODO - move this "to device" eleswhere
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                batch[k] = v.to(accelerator.device)
 
         encoder_outputs, attention_mask = get_ref_embeddings(batch, accelerator)
         batch["encoder_outputs"] = encoder_outputs
@@ -572,6 +583,10 @@ def main():
 
         model = accelerator.unwrap_model(model, keep_fp32_wrapper=mixed_precision != "fp16")
         model.eval()
+        # TODO - move this "to device" eleswhere
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                batch[k] = v.to(accelerator.device)
 
         encoder_outputs, attention_mask = get_ref_embeddings(batch, accelerator)
         batch["encoder_outputs"] = encoder_outputs
@@ -622,6 +637,7 @@ def main():
 
     if accelerator.is_main_process:
         if training_args.push_to_hub:
+            logger.info("Pushing to the hub")
             # Retrieve of infer repo_name
             repo_name = training_args.hub_model_id
             if repo_name is None:
@@ -635,12 +651,15 @@ def main():
                 if "wandb" not in gitignore:
                     gitignore.write("wandb\n")
         elif training_args.output_dir is not None:
+            logger.info(f"Creating model checkpoint output directory: {training_args.output_dir}")
             os.makedirs(training_args.output_dir, exist_ok=True)
+    logger.info("Accelerator waiting for everyone")
     accelerator.wait_for_everyone()
 
     # Now save everything to be able to create a single processor later
     # make sure all processes wait until data is saved
     with accelerator.main_process_first():
+        logger.info("Saving model checkpoint and configuration to output directory...")
         # only the main process saves them
         if accelerator.is_main_process:
             # save tokenizer and config
@@ -661,6 +680,7 @@ def main():
             config.save_pretrained(training_args.output_dir)
 
     if checkpoint is not None:
+        logger.info(f"Checkpoint found, loading: {checkpoint}")
         accelerator.load_state(checkpoint)
         # Find num steps and epoch from saved state string pattern
         pattern = r"checkpoint-(\d+)-epoch-(\d+)"
@@ -695,7 +715,10 @@ def main():
         "min_new_tokens": model_args.num_codebooks + 1,
     }
 
+    logger.info(f"Updated gen_kwargs: {gen_kwargs}")
+
     for epoch in range(epochs_trained, num_epochs):
+        logger.info(f"Epoch {epoch}")
         # TODO Check the below
         if hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDataset):
             train_dataloader.dataset.set_epoch(epoch)
@@ -763,11 +786,10 @@ def main():
                                 blocking=False,
                             )
 
-                # if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps):
-                if training_args.do_eval and (
-                    cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1
-                ):
-                    accelerator.wait_for_everyone()  # NOTE not sure this is required
+                if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps):
+                    # if training_args.do_eval and (
+                    #     cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1
+                    # ):
                     # ======================== Evaluating ==============================
                     logger.info("***** Running evaluation *****")
                     train_time += time.time() - train_start
@@ -792,7 +814,6 @@ def main():
 
                     if training_args.predict_with_generate:
                         generation_count = 0
-                        accelerator.wait_for_everyone()  # NOTE not sure this is required
                         logger.info("***** Running generation *****")
                         # release eval input batch (in favour of generate)
                         batch = release_memory(batch)

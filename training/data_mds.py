@@ -44,7 +44,7 @@ def gather_streams(manifest_path: str, s3_bucket_root: str, mds_cache_dir: str):
     assert len(buckets) > 0, "No datasets found in manifest."
 
     # Should now have e.g. ["s3://my-data-bucket/dataset_name_1", "s3://my-data-bucket/dataset_name_2", etc.]
-    streams = [Stream(remote=bucket, local=cache_dir) for bucket, cache_dir in zip(buckets, cache_dirs)]
+    streams = [Stream(remote=None, local=cache_dir) for bucket, cache_dir in zip(buckets, cache_dirs)]
 
     return streams
 
