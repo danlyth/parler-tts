@@ -262,18 +262,17 @@ def main():
 
         else:
             train_dataset_local = DatasetLocal(
-                # root_audio_dir=data_args.root_audio_dir,
-                root_audio_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed",
-                # root_dac_dir=data_args.root_dac_dir,
-                root_dac_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes/24khz_cz2048_nc10",
-                # metadata_path=data_args.train_metadata_path,
-                metadata_path="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/train_local.tsv",
+                root_audio_dir=data_args.finetune_audio_dir,
+                root_dac_dir=data_args.finetune_code_dir,
+                metadata_path=data_args.finetune_train_metadata_path,
                 prompt_tokenizer=prompt_tokenizer,
-                audio_sr=model_args.audio_ref_encoder_sr,  # TODO (Dan) remove these three lines of hard-coding
+                audio_sr=model_args.audio_ref_encoder_sr,
                 audio_ref_len=model_args.audio_ref_len,
                 num_codebooks=model_args.num_codebooks,
                 audio_encoder_bos_token_id=audio_encoder_bos_token_id,
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
+                use_same_file_ref=data_args.finetune_use_same_file_ref,
+                use_precomputed_ref_embed=data_args.finetune_use_precomputed_ref_embed,
             )
 
             if data_args.max_train_samples is not None:
@@ -315,18 +314,17 @@ def main():
 
         else:
             valid_dataset_local = DatasetLocal(
-                # root_audio_dir=data_args.root_audio_dir,
-                root_audio_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed",
-                # root_dac_dir=data_args.root_dac_dir,
-                root_dac_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes/24khz_cz2048_nc10",
-                # metadata_path=data_args.eval_metadata_path,
-                metadata_path="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/dev_local.tsv",
+                root_audio_dir=data_args.finetune_audio_dir,
+                root_dac_dir=data_args.finetune_code_dir,
+                metadata_path=data_args.finetune_eval_metadata_path,
                 prompt_tokenizer=prompt_tokenizer,
-                audio_sr=model_args.audio_ref_encoder_sr,  # TODO (Dan) remove all this hard-coding
+                audio_sr=model_args.audio_ref_encoder_sr,
                 audio_ref_len=model_args.audio_ref_len,
                 num_codebooks=model_args.num_codebooks,
                 audio_encoder_bos_token_id=audio_encoder_bos_token_id,
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
+                use_same_file_ref=data_args.finetune_use_same_file_ref,
+                use_precomputed_ref_embed=data_args.finetune_use_precomputed_ref_embed,
             )
 
             if data_args.max_eval_samples is not None:
@@ -360,18 +358,17 @@ def main():
             )
         else:
             generate_dataset_local = DatasetLocal(
-                # root_audio_dir=data_args.root_audio_dir,
-                root_audio_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed",
-                # root_dac_dir=data_args.root_dac_dir,
-                root_dac_dir="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/dac_codes/24khz_cz2048_nc10",
-                # metadata_path=data_args.eval_metadata_path,
-                metadata_path="/shared/tts_finetune_data/expresso/audio_48khz_short_chunks_ex02_processed/test_local.tsv",
+                root_audio_dir=data_args.finetune_audio_dir,
+                root_dac_dir=data_args.finetune_code_dir,
+                metadata_path=data_args.finetune_generate_metadata_path,
                 prompt_tokenizer=prompt_tokenizer,
-                audio_sr=model_args.audio_ref_encoder_sr,  # TODO (Dan) remove all this hard-coding
+                audio_sr=model_args.audio_ref_encoder_sr,
                 audio_ref_len=model_args.audio_ref_len,
                 num_codebooks=model_args.num_codebooks,
                 audio_encoder_bos_token_id=audio_encoder_bos_token_id,
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
+                use_same_file_ref=data_args.finetune_use_same_file_ref,
+                use_precomputed_ref_embed=data_args.finetune_use_precomputed_ref_embed,
             )
 
             if data_args.max_generate_samples is not None:
@@ -389,8 +386,7 @@ def main():
 
     # Define Training Schedule
     # Store some constants
-    per_device_train_batch_size = int(training_args.per_device_train_batch_size)
-    train_batch_size = per_device_train_batch_size * accelerator.num_processes
+    train_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes
     gradient_accumulation_steps = int(training_args.gradient_accumulation_steps)
 
     if training_args.max_steps < 0:
@@ -462,30 +458,6 @@ def main():
     # validation_dataloader = accelerator.prepare(validation_dataloader)
     # generate_dataloader = accelerator.prepare(generate_dataloader)
 
-    # # Test the dataloaders again
-    # logger.info("Testing the dataloaders AFTER preparing with accelerate")
-    # if training_args.do_train:
-    #     logger.info(f"Number of training samples: {len(train_dataloader)}")
-    #     for batch in train_dataloader:
-    #         break
-    #     logger.info("Training data example")
-    #     for key, value in batch.items():
-    #         logger.info(f"{key}: {value.shape}")
-    # if training_args.do_eval:
-    #     logger.info(f"Number of validation samples: {len(validation_dataloader)}")
-    #     for batch in validation_dataloader:
-    #         break
-    #     logger.info("Validation data example")
-    #     for key, value in batch.items():
-    #         logger.info(f"{key}: {value.shape}")
-    # if training_args.predict_with_generate:
-    #     logger.info(f"Number of generation samples: {len(generate_dataloader)}")
-    #     for batch in generate_dataloader:
-    #         break
-    #     logger.info("Generation data example")
-    #     for key, value in batch.items():
-    #         logger.info(f"{key}: {value.shape}")
-
     # Define gradient update step fn
 
     def get_ref_embeddings(batch, accelerator):
@@ -524,20 +496,16 @@ def main():
         accelerator,
         autocast_kwargs,
     ):
-        logger.info("Training step")
         model.train()
 
         # TODO - move this "to device" eleswhere
-        logger.info("putting batch into device")
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
                 batch[k] = v.to(accelerator.device)
-        logger.info("getting reference embeddings")
         encoder_outputs, attention_mask = get_ref_embeddings(batch, accelerator)
         batch["encoder_outputs"] = encoder_outputs
         batch["attention_mask"] = attention_mask
 
-        logger.info("running model")
         outputs = model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
@@ -601,11 +569,9 @@ def main():
         return output_audios, audio_refs
 
     logger.info("***** Running training *****")
-    logger.info(
-        f"  Num samples in training dataset= {(len(train_dataloader) * train_batch_size * accelerator.num_processes):,}"
-    )
+    logger.info(f"  Num samples in training dataset= {(len(train_dataloader) * train_batch_size):,}")
     logger.info(f"  Num examples = {(total_train_steps * train_batch_size * gradient_accumulation_steps):,}")
-    logger.info("  Instantaneous batch size per device =" f" {per_device_train_batch_size}")
+    logger.info("  Instantaneous batch size per device =" f" {training_args.per_device_train_batch_size}")
     logger.info("  Gradient accumulation steps =" f" {gradient_accumulation_steps}")
     logger.info(
         f"  Total train batch size (w. parallel & distributed) = {train_batch_size * gradient_accumulation_steps}"
@@ -718,7 +684,6 @@ def main():
     logger.info(f"Updated gen_kwargs: {gen_kwargs}")
 
     for epoch in range(epochs_trained, num_epochs):
-        logger.info(f"Epoch {epoch}")
         # TODO Check the below
         if hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDataset):
             train_dataloader.dataset.set_epoch(epoch)
@@ -786,10 +751,10 @@ def main():
                                 blocking=False,
                             )
 
-                if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps):
-                    # if training_args.do_eval and (
-                    #     cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1
-                    # ):
+                # if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps):
+                if training_args.do_eval and (
+                    cur_step % eval_steps == 0 or cur_step == total_train_steps or cur_step == 1
+                ):
                     # ======================== Evaluating ==============================
                     logger.info("***** Running evaluation *****")
                     train_time += time.time() - train_start
