@@ -329,6 +329,10 @@ class DataTrainingArguments:
         default="parler-speech",
         metadata={"help": "The name of the wandb project."},
     )
+    wandb_run_name: str = field(
+        default=None,
+        metadata={"help": "The name of the wandb run"},
+    )
     save_to_disk: str = field(
         default=None,
         metadata={
@@ -358,6 +362,34 @@ class DataTrainingArguments:
     mds_cache_limit: str = field(
         default="5tb",
         metadata={"help": "The cache limit for MDS."},
+    )
+    finetune_audio_dir: str = field(
+        default=None,
+        metadata={"help": "The directory containing the audio files for fine-tuning."},
+    )
+    finetune_code_dir: str = field(
+        default=None,
+        metadata={"help": "The directory containing the discrete audio features (e.g. DAC) for fine-tuning."},
+    )
+    finetune_train_metadata_path: str = field(
+        default=None,
+        metadata={"help": "The path to the train metadata file (e.g. .tsv) for fine-tuning."},
+    )
+    finetune_eval_metadata_path: str = field(
+        default=None,
+        metadata={"help": "The path to the eval metadata file (e.g. .tsv) for fine-tuning."},
+    )
+    finetune_generate_metadata_path: str = field(
+        default=None,
+        metadata={"help": "The path to the generate metadata file (e.g. .tsv) for fine-tuning."},
+    )
+    finetune_use_same_file_ref: bool = field(
+        default=False,
+        metadata={"help": "Whether to use the same file as reference for audio conditioning."},
+    )
+    finetune_use_precomputed_ref_embed: bool = field(
+        default=False,
+        metadata={"help": "Whether to use precomputed reference embeddings for audio conditioning."},
     )
     per_device_generate_batch_size: int = field(
         default=8,

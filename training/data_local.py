@@ -18,15 +18,19 @@ class DatasetLocal(torch.utils.data.Dataset):
         metadata_path: str,  # path to tsv file with 2 columns: file_path, transcription
         prompt_tokenizer: AutoTokenizer,
         audio_sr: int = 16000,  # audio sample rate for reference encoder, typically 16kHz
-        audio_ref_len: int = 2,  # audio reference length (in seconds) for reference encoder
-        num_codebooks: int = 9,  # number of codebooks in the DAC features
+        audio_ref_len: Optional[int] = None,  # audio reference length (in seconds) for reference encoder
+        audio_ref_percentage: Optional[float] = None,  # percentage of audio to use for reference encoder
+        num_codebooks: int = None,  # number of codebooks in the DAC features
         audio_encoder_bos_token_id: int = None,  # BOS token id for audio encoder
         audio_encoder_eos_token_id: int = None,  # EOS token id for audio encoder
+        use_same_file_ref: bool = False,  # whether to use the same audio file as reference
+        use_precomputed_ref_embed: bool = False,  # whether to use precomputed reference embeddings, one per style directory
     ):
         self.root_audio_dir = Path(root_audio_dir)
         self.root_dac_dir = Path(root_dac_dir)
         self.audio_sr = audio_sr
         self.audio_ref_len = audio_ref_len
+        self.audio_ref_percentage = audio_ref_percentage
         self.prompt_tokenizer = prompt_tokenizer
         self.num_codebooks = num_codebooks
         if audio_encoder_bos_token_id is None:
@@ -36,19 +40,23 @@ class DatasetLocal(torch.utils.data.Dataset):
         self.audio_encoder_bos_token_id = audio_encoder_bos_token_id
         self.audio_encoder_eos_token_id = audio_encoder_eos_token_id
         self.bos_labels = torch.ones((1, num_codebooks, 1)) * audio_encoder_bos_token_id
+        self.use_same_file_ref = use_same_file_ref
+        self.use_precomputed_ref_embed = use_precomputed_ref_embed
 
         with open(metadata_path, "r") as f:
             self.data = f.readlines()
 
     def __getitem__(self, index):
         x = self.data[index]
-        audio_path, transcription = x.split("\t")
-        audio_path = self.root_audio_dir / audio_path
+        _, relative_audio_path, _, _, transcription = x.split("\t")
+        # relative audio paths starts with "train/...", "dev/...", "test/...
+        audio_path = self.root_audio_dir / relative_audio_path
+        dac_path = (self.root_dac_dir / relative_audio_path).with_suffix(".pt")
 
-        dac_path = (self.root_dac_dir / audio_path.relative_to(self.root_audio_dir)).with_suffix(".pt")
+        if not self.use_same_file_ref:
+            # Use a different audio file from the same style directory as reference rather than the same audio file
+            audio_path = random.choice(list(audio_path.parent.glob("*.wav")))
 
-        # Use a different audio file from the same style directory as reference rather than the same audio file
-        audio_path = random.choice(list(audio_path.parent.glob("*.wav")))
         audio, sr = torchaudio.load(audio_path)
         assert audio.size(0) == 1, f"Audio must be mono, but got {audio.size(0)} channels"
 
@@ -58,20 +66,32 @@ class DatasetLocal(torch.utils.data.Dataset):
 
         # Creating a reference audio segment of fixed length (audio_ref_len)
         audio = audio.squeeze()
-        len_audio = audio.size(0)
+        audio_len = audio.size(0)
 
-        # Check and pad if audio is shorter than required length
-        if len_audio < self.audio_sr * self.audio_ref_len:
-            pad = torch.zeros(self.audio_sr * self.audio_ref_len - len_audio)
-            audio = torch.cat([audio, pad])
+        # Select a segment of audio to use
+        if self.audio_ref_len and self.audio_ref_percentage:
+            raise ValueError("Cannot specify both audio_ref_len and audio_ref_percentage")
 
-        # Check to ensure there's enough audio to select a segment
-        if len_audio > self.audio_sr * self.audio_ref_len:
-            start = torch.randint(0, len_audio - self.audio_sr * self.audio_ref_len, (1,)).item()
-        else:
-            start = 0  # Default to start at 0 if exactly the required length or error handled above
+        if not self.audio_ref_len and not self.audio_ref_percentage:
+            raise ValueError("Must specify either audio_ref_len or audio_ref_percentage")
 
-        audio = audio[start : start + self.audio_sr * self.audio_ref_len]
+        if self.audio_ref_len is not None:
+            # Check and pad if audio is shorter than required length
+            if audio_len < self.audio_sr * self.audio_ref_len:
+                pad = torch.zeros(self.audio_sr * self.audio_ref_len - audio.size(0))
+                audio = torch.cat([audio, pad])
+
+            if audio_len > self.audio_sr * self.audio_ref_len:
+                start = torch.randint(0, audio_len - self.audio_sr * self.audio_ref_len, (1,)).item()
+            else:
+                start = 0  # Default to start at 0 if exactly the required length or error handled above
+
+            audio = audio[start : start + self.audio_sr * self.audio_ref_len]
+
+        elif self.audio_ref_percentage is not None:
+            audio_ref_len = int(audio_len * self.audio_ref_percentage)
+            start = torch.randint(0, audio_len - audio_ref_len, (1,)).item()  # (1,) - single random integer
+            audio = audio[start : start + audio_ref_len]
 
         # Load DAC codes and re-arrange into the delay pattern
         labels = torch.load(dac_path)  # Shape (n_codebooks, n_frames)
@@ -102,12 +122,35 @@ class DatasetLocal(torch.utils.data.Dataset):
         # Tokenize the transcription
         transcript_tokens = self.prompt_tokenizer(transcription)["input_ids"]
 
-        features = {
-            "audio_ref": audio,
-            "labels": labels,
-            "prompt_input_ids": transcript_tokens,
-            # "len_audio": len_audio # length of the original audio file, don't think we need this
-        }
+        if self.use_precomputed_ref_embed:
+            # Load precomputed reference embeddings
+
+            #################################
+
+            ref_embed_root = self.root_audio_dir.parent / "wavlm_base_plus_layer_5_mean_norm/"
+            # TODO replace this hard-coding
+
+            #################################
+
+            relative_style_dir = Path(relative_audio_path).parent
+            ref_embed_path = ref_embed_root / relative_style_dir / "mean_normalized.pt"
+            ref_embed = torch.load(ref_embed_path)  # Size (1, embedding dimension)
+            attention_mask = torch.ones(1)  # we're using mean embeddings, hence this shape
+
+            features = {
+                "audio_ref": audio,
+                "labels": labels,
+                "prompt_input_ids": transcript_tokens,
+                "encoder_outputs": ref_embed,
+                "attention_mask": attention_mask,
+            }
+        else:
+            features = {
+                "audio_ref": audio,
+                "labels": labels,
+                "prompt_input_ids": transcript_tokens,
+                # "len_audio": len_audio # length of the original audio file, don't think we need this
+            }
 
         return features
 
@@ -224,17 +267,25 @@ class DataCollator:
         batch["audio_ref"] = audio_ref
         batch["audio_ref_attention_mask"] = audio_ref_attention_mask
 
-        # Downsample the audio attention mask frame-rate from 16kHz to 50Hz
-        attention_mask = (
-            torch.nn.functional.interpolate(
-                audio_ref_attention_mask.unsqueeze(1).float(), scale_factor=1 / 320, mode="nearest"
+        if "encoder_outputs" in features[0]:  # True when fine-tuning with pre-computed embeddings
+            encoder_outputs = [feature["encoder_outputs"] for feature in features]
+            # These pre-computed embeddings are all the same size
+            batch["encoder_outputs"] = torch.stack(encoder_outputs)
+            attention_mask = [feature["attention_mask"] for feature in features]
+            batch["attention_mask"] = torch.stack(attention_mask)
+
+        else:
+            # Downsample the audio attention mask frame-rate from 16kHz to 50Hz
+            attention_mask = (
+                torch.nn.functional.interpolate(
+                    audio_ref_attention_mask.unsqueeze(1).float(), scale_factor=1 / 320, mode="nearest"
+                )
+                .squeeze(-1)
+                .round()  # Ensure values are 0 or 1
+                .int()  # Convert to integers (0 or 1)
             )
-            .squeeze(-1)
-            .round()  # Ensure values are 0 or 1
-            .int()  # Convert to integers (0 or 1)
-        )
-        batch["attention_mask"] = attention_mask.squeeze(1)
-        # NOTE This needs to be padded/cropped to be exactly the same length as batch["encoder_outputs"]
-        # but we'll do this in the training loop as we don't know the exact length here
+            batch["attention_mask"] = attention_mask.squeeze(1)
+            # NOTE This needs to be padded/cropped to be exactly the same length as batch["encoder_outputs"]
+            # but we'll do this in the training loop as we don't know the exact length here
 
         return batch
