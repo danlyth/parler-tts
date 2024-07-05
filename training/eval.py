@@ -1,5 +1,6 @@
 from typing import List, Tuple
 import evaluate
+import librosa
 import torch
 from transformers import AutoModel, AutoProcessor, pipeline
 from transformers import (
@@ -81,6 +82,23 @@ def spk_sim(
     speaker_id_model.to(device)
     speaker_id_model.eval()
 
+    # Need to trim silence to get decent results and unfortunately this needs to be done in Librosa on the CPU
+    preds = [librosa.effects.trim(pred.cpu().numpy())[0] for pred in preds]
+    refs = [librosa.effects.trim(ref.cpu().numpy())[0] for ref in refs]  # TODO don't need to do this for references
+
+    # Then need to put them back on to the device
+    preds = [torch.from_numpy(pred).to(device) for pred in preds]
+    refs = [torch.from_numpy(ref).to(device) for ref in refs]
+
+    # If any of the refs or preds are too short, pad them
+    min_len = 8000  # 0.5 seconds at 16kHz
+    for i in range(len(preds)):
+        if len(preds[i]) < min_len:
+            preds[i] = torch.nn.functional.pad(preds[i], (0, min_len - len(preds[i])))
+    for i in range(len(refs)):
+        if len(refs[i]) < min_len:
+            refs[i] = torch.nn.functional.pad(refs[i], (0, min_len - len(refs[i])))
+
     pred_embs = []
     ref_embs = []
     with torch.no_grad():
@@ -114,6 +132,7 @@ def compute_metrics(
     prompts = prompt_tokenizer.batch_decode(prompts, skip_special_tokens=True)
     spk_similarity, _ = spk_sim(audio_preds, audio_refs, device)
     audio_preds_np = [a.cpu().numpy() for a in audio_preds]  # Required for ASR pipeline
+    audio_preds_np = [librosa.effects.trim(pred)[0] for pred in audio_preds_np]  # Removing trailing silence
     # word_error, transcriptions = wer(asr_model_name_or_path, prompts, audio_preds_np, device, batch_size, sample_rate)
     word_error, transcriptions = wer(asr_model_name_or_path, prompts, audio_preds_np, device, 1, sample_rate)
 
