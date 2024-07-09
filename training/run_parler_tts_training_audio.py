@@ -832,6 +832,7 @@ def main():
                                 pred_prompts,
                                 transcriptions,
                                 audios,
+                                eval_refs,
                                 sampling_rate=sample_rate,
                                 step=cur_step,
                                 prefix="eval",

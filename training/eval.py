@@ -2,6 +2,7 @@ from typing import List, Tuple
 import evaluate
 import librosa
 import torch
+import torchaudio
 from transformers import AutoModel, AutoProcessor, pipeline
 from transformers import (
     AutoModel,
@@ -130,7 +131,12 @@ def compute_metrics(
     results = {}
 
     prompts = prompt_tokenizer.batch_decode(prompts, skip_special_tokens=True)
-    spk_similarity, _ = spk_sim(audio_preds, audio_refs, device)
+
+    # Need to ensure that audio_preds have the same sampling rate as the ASR model and speaker similarity model
+    resampler = torchaudio.transforms.Resample(sample_rate, 16_000).to(device)  # TODO, remove this hard-coding
+    audio_preds_resampled = [resampler(audio) for audio in audio_preds]
+
+    spk_similarity, _ = spk_sim(audio_preds_resampled, audio_refs, device)
     audio_preds_np = [a.cpu().numpy() for a in audio_preds]  # Required for ASR pipeline
     audio_preds_np = [librosa.effects.trim(pred)[0] for pred in audio_preds_np]  # Removing trailing silence
     # word_error, transcriptions = wer(asr_model_name_or_path, prompts, audio_preds_np, device, batch_size, sample_rate)

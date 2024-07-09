@@ -108,6 +108,9 @@ class ModelArguments:
     audio_ref_encoder_mean_pooling: bool = field(
         default=False, metadata={"help": "Whether to use mean pooling for audio reference encoding."}
     )
+    return_full_ref_audio: bool = field(
+        default=False, metadata={"help": "Whether to return the full reference audio file."}
+    )
 
 
 @dataclass

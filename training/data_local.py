@@ -25,6 +25,7 @@ class DatasetLocal(torch.utils.data.Dataset):
         audio_encoder_eos_token_id: int = None,  # EOS token id for audio encoder
         use_same_file_ref: bool = False,  # whether to use the same audio file as reference
         use_precomputed_ref_embed: bool = False,  # whether to use precomputed reference embeddings, one per style directory
+        return_full_ref_audio: bool = False,  # whether to return the full reference audio file, useful for computing speaking similarity
     ):
         self.root_audio_dir = Path(root_audio_dir)
         self.root_dac_dir = Path(root_dac_dir)
@@ -42,6 +43,7 @@ class DatasetLocal(torch.utils.data.Dataset):
         self.bos_labels = torch.ones((1, num_codebooks, 1)) * audio_encoder_bos_token_id
         self.use_same_file_ref = use_same_file_ref
         self.use_precomputed_ref_embed = use_precomputed_ref_embed
+        self.return_full_ref_audio = return_full_ref_audio
 
         with open(metadata_path, "r") as f:
             self.data = f.readlines()
@@ -59,6 +61,13 @@ class DatasetLocal(torch.utils.data.Dataset):
 
         audio, sr = torchaudio.load(audio_path)
         assert audio.size(0) == 1, f"Audio must be mono, but got {audio.size(0)} channels"
+
+        if self.return_full_ref_audio:
+            audio_ref_full = audio
+            # TODO remove this hard-coding
+            resampler = torchaudio.transforms.Resample(sr, 24000)  # 24kHz is the current sample rate of the DAC model
+            audio_ref_full = resampler(audio_ref_full)
+            audio_ref_full = audio_ref_full.squeeze()
 
         if sr != self.audio_sr:
             resampler = torchaudio.transforms.Resample(sr, self.audio_sr)
@@ -137,20 +146,38 @@ class DatasetLocal(torch.utils.data.Dataset):
             ref_embed = torch.load(ref_embed_path)  # Size (1, embedding dimension)
             attention_mask = torch.ones(1)  # we're using mean embeddings, hence this shape
 
-            features = {
-                "audio_ref": audio,
-                "labels": labels,
-                "prompt_input_ids": transcript_tokens,
-                "encoder_outputs": ref_embed,
-                "attention_mask": attention_mask,
-            }
+            if self.return_full_ref_audio:
+                features = {
+                    "audio_ref": audio,
+                    "audio_ref_full": audio_ref_full,
+                    "labels": labels,
+                    "prompt_input_ids": transcript_tokens,
+                    "encoder_outputs": ref_embed,
+                    "attention_mask": attention_mask,
+                }
+            else:
+                features = {
+                    "audio_ref": audio,
+                    "labels": labels,
+                    "prompt_input_ids": transcript_tokens,
+                    "encoder_outputs": ref_embed,
+                    "attention_mask": attention_mask,
+                }
         else:
-            features = {
-                "audio_ref": audio,
-                "labels": labels,
-                "prompt_input_ids": transcript_tokens,
-                # "len_audio": len_audio # length of the original audio file, don't think we need this
-            }
+            if self.return_full_ref_audio:
+                features = {
+                    "audio_ref": audio,
+                    "audio_ref_full": audio_ref_full,
+                    "labels": labels,
+                    "prompt_input_ids": transcript_tokens,
+                }
+            else:
+                features = {
+                    "audio_ref": audio,
+                    "labels": labels,
+                    "prompt_input_ids": transcript_tokens,
+                    # "len_audio": len_audio # length of the original audio file, don't think we need this
+                }
 
         return features
 
@@ -287,5 +314,11 @@ class DataCollator:
             batch["attention_mask"] = attention_mask.squeeze(1)
             # NOTE This needs to be padded/cropped to be exactly the same length as batch["encoder_outputs"]
             # but we'll do this in the training loop as we don't know the exact length here
+
+        if "audio_ref_full" in features[0]:
+            pad_value = 0  # In this case, we don't need an attention mask, so padding with 0 is fine
+            audio_ref_full = [feature["audio_ref_full"] for feature in features]
+            audio_ref_full = torch.nn.utils.rnn.pad_sequence(audio_ref_full, batch_first=True, padding_value=pad_value)
+            batch["audio_ref_full"] = audio_ref_full
 
         return batch

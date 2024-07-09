@@ -121,6 +121,7 @@ def log_pred(
     pred_prompts: List[str],
     transcriptions: List[str],
     audios: List[torch.Tensor],
+    ref_audios: List[torch.Tensor],
     sampling_rate: int,
     step: int,
     prefix: str = "eval",
@@ -148,6 +149,12 @@ def log_pred(
             normalize_loudness(audio.unsqueeze(0), sample_rate=sampling_rate, loudness_headroom_db=22).squeeze().cpu()
             for audio in audios
         ]
+        ref_audios = [
+            normalize_loudness(ref_audio.unsqueeze(0), sample_rate=sampling_rate, loudness_headroom_db=22)
+            .squeeze()
+            .cpu()
+            for ref_audio in ref_audios
+        ]
         # wandb can only loads 100 audios per step
         wandb_tracker.log(
             {
@@ -158,6 +165,18 @@ def log_pred(
                         sample_rate=sampling_rate,
                     )
                     for (i, audio) in enumerate(audios[: min(len(audios), 100)])
+                ]
+            },
+            step=step,
+        )
+        wandb_tracker.log(
+            {
+                "Reference": [
+                    Audio(
+                        ref_audio,
+                        sample_rate=sampling_rate,
+                    )
+                    for (i, ref_audio) in enumerate(ref_audios[: min(len(ref_audios), 100)])
                 ]
             },
             step=step,
