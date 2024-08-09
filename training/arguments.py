@@ -67,7 +67,7 @@ class ModelArguments:
         metadata={"help": "Audio encoder bandwidth."},
     )
     asr_model_name_or_path: str = field(
-        default="distil-whisper/distil-large-v2",
+        default="distil-whisper/distil-large-v3",
         metadata={
             "help": "Used to compute WER during evaluation. Path to pretrained model or model identifier from huggingface.co/models"
         },
@@ -393,6 +393,10 @@ class DataTrainingArguments:
     finetune_use_precomputed_ref_embed: bool = field(
         default=False,
         metadata={"help": "Whether to use precomputed reference embeddings for audio conditioning."},
+    )
+    finetune_precomputed_ref_embed_path: str = field(
+        default=None,
+        metadata={"help": "Option path to a single precomputed reference embedding for audio conditioning."},
     )
     per_device_generate_batch_size: int = field(
         default=8,

@@ -189,7 +189,9 @@ def main():
         prompt_tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
     # load audio reference encoder
-    audio_ref_encoder = AutoModel.from_pretrained(model_args.audio_ref_encoder_name, output_hidden_states=True)
+    audio_ref_encoder = AutoModel.from_pretrained(
+        model_args.audio_ref_encoder_name, output_hidden_states=True, output_attentions=True
+    )
     audio_ref_encoder.to(training_args.device)
     audio_ref_encoder.eval()
     if model_args.audio_ref_encoder_hidden_layer is not None:
@@ -275,6 +277,7 @@ def main():
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
                 use_same_file_ref=data_args.finetune_use_same_file_ref,
                 use_precomputed_ref_embed=data_args.finetune_use_precomputed_ref_embed,
+                precomputed_ref_embed_path=data_args.finetune_precomputed_ref_embed_path,
             )
 
             if data_args.max_train_samples is not None:
@@ -328,6 +331,7 @@ def main():
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
                 use_same_file_ref=data_args.finetune_use_same_file_ref,
                 use_precomputed_ref_embed=data_args.finetune_use_precomputed_ref_embed,
+                precomputed_ref_embed_path=data_args.finetune_precomputed_ref_embed_path,
             )
 
             if data_args.max_eval_samples is not None:
@@ -373,6 +377,7 @@ def main():
                 audio_encoder_eos_token_id=audio_encoder_eos_token_id,
                 use_same_file_ref=data_args.finetune_use_same_file_ref,
                 use_precomputed_ref_embed=data_args.finetune_use_precomputed_ref_embed,
+                precomputed_ref_embed_path=data_args.finetune_precomputed_ref_embed_path,
             )
 
             if data_args.max_generate_samples is not None:
@@ -490,18 +495,90 @@ def main():
 
     # Define gradient update step fn
 
+    # def get_ref_embeddings(batch, accelerator):
+    #     with accelerator.autocast(autocast_handler=autocast_kwargs):
+    #         with torch.no_grad():
+    #             encoder_outputs = audio_ref_encoder(batch["audio_ref"], batch["audio_ref_attention_mask"])
+    #         if model_args.audio_ref_encoder_hidden_layer is not None:
+    #             hidden_layer = model_args.audio_ref_encoder_hidden_layer
+    #             encoder_outputs = encoder_outputs.hidden_states[hidden_layer]
+    #         else:
+    #             encoder_outputs = encoder_outputs.last_hidden_state
+    #         if model_args.audio_ref_encoder_mean_pooling:
+    #             encoder_outputs = torch.mean(encoder_outputs, dim=1)
+    #         encoder_outputs = BaseModelOutput(encoder_outputs)
+    #         # Size of encoder_outputs.last_hidden_state is (batch_size, audio_ref length / downsampling, hidden_size)
+    #         # Check that batch["attention_mask"] is the size as encoder_outputs and crop/pad as necessary
+    #         if "attention_mask" in batch and not model_args.audio_ref_encoder_mean_pooling:
+    #             attention_mask = batch["attention_mask"]
+    #             encoder_outputs_len = encoder_outputs.last_hidden_state.size(1)
+    #             attention_mask_len = attention_mask.size(1)
+    #             # attention_mask shape is (batch_size, 1, audio_ref length / downsampling)
+    #             # however, this mask isn't always exactly the same length as the encoder_outputs
+    #             if encoder_outputs_len < attention_mask_len:
+    #                 attention_mask = attention_mask[:, :encoder_outputs_len]
+    #             if encoder_outputs_len > attention_mask_len:
+    #                 pad_length = encoder_outputs_len - attention_mask_len
+    #                 pad = torch.zeros(attention_mask.size(0), pad_length, device=accelerator.device)
+    #                 attention_mask = torch.cat([attention_mask, pad], dim=-1)
+    #         else:
+    #             attention_mask = None
+    #     return encoder_outputs, attention_mask
+
     def get_ref_embeddings(batch, accelerator):
         with accelerator.autocast(autocast_handler=autocast_kwargs):
             with torch.no_grad():
                 encoder_outputs = audio_ref_encoder(batch["audio_ref"], batch["audio_ref_attention_mask"])
+                # last_hidden_state, extract_features, hidden_states, attentions
             if model_args.audio_ref_encoder_hidden_layer is not None:
                 hidden_layer = model_args.audio_ref_encoder_hidden_layer
-                encoder_outputs = encoder_outputs.hidden_states[hidden_layer]
+                if model_args.audio_ref_encoder_mean_pooling:
+                    # Updated to use the attentions from the audio ref encoder to create a mask
+                    # and ensure that the mean pooling is not including padded positions
+                    # This mask is similar to the batch["attention_mask"] but slightly more accurate
+                    # Either way, previously we weren't using any attention mask when mean pooling
+                    # which was a mistake
+                    encoder_output_attentions = encoder_outputs["attentions"][hidden_layer]
+                    # batch_size, num_heads, sequence_length, sequence_length
+                    encoder_output_attentions = encoder_output_attentions[:, 0, 0, :]
+                    # batch size, length
+                    encoder_output_attention_mask = torch.where(
+                        encoder_output_attentions > 0, torch.tensor(1), torch.tensor(0)
+                    )
+                    encoder_output_attention_mask = encoder_output_attention_mask.to(accelerator.device)
+                    encoder_output_attention_mask = encoder_output_attention_mask.unsqueeze(-1)
+                    # batch size, length, 1
+
+                    encoder_outputs = encoder_outputs.hidden_states[hidden_layer]
+                    masked_embeddings = encoder_outputs * encoder_output_attention_mask
+                    # batch size, length, hidden size
+
+                    # Sum the embeddings along the length dimension
+                    sum_embeddings = masked_embeddings.sum(dim=1)  # batch size, embedding_dim
+
+                    # Sum the attention mask along the length dimension to count non-padded positions
+                    non_padded_counts = encoder_output_attention_mask.sum(dim=1)  # batch size, 1
+
+                    # Prevent division by zero by setting zero counts to one
+                    non_padded_counts = non_padded_counts.masked_fill(non_padded_counts == 0, 1.0)
+
+                    # Divide summed embeddings by the count of non-padded positions to get the mean
+                    mean_embeddings = sum_embeddings / non_padded_counts  # batch_size, embedding_dim
+
+                    # Old method below:
+                    # encoder_outputs = torch.mean(encoder_outputs, dim=1)
+                    encoder_outputs = BaseModelOutput(mean_embeddings)
+
+                else:
+                    encoder_outputs = encoder_outputs.hidden_states[hidden_layer]
+                    encoder_outputs = BaseModelOutput(encoder_outputs)
             else:
-                encoder_outputs = encoder_outputs.last_hidden_state
-            if model_args.audio_ref_encoder_mean_pooling:
-                encoder_outputs = torch.mean(encoder_outputs, dim=1)
-            encoder_outputs = BaseModelOutput(encoder_outputs)
+                if model_args.audio_ref_encoder_mean_pooling:
+                    raise ValueError("Not currently supported")
+                else:
+                    encoder_outputs = encoder_outputs.last_hidden_state
+                    encoder_outputs = BaseModelOutput(encoder_outputs)
+
             # Size of encoder_outputs.last_hidden_state is (batch_size, audio_ref length / downsampling, hidden_size)
             # Check that batch["attention_mask"] is the size as encoder_outputs and crop/pad as necessary
             if "attention_mask" in batch and not model_args.audio_ref_encoder_mean_pooling:
@@ -598,6 +675,8 @@ def main():
             batch["encoder_outputs"] = BaseModelOutput(batch["encoder_outputs"])
 
         audio_refs = batch.pop("audio_ref", None)
+        # audio_refs are padded with -10000000 (to ensure safe attention mask creation), replace with 0s
+        audio_refs = torch.where(audio_refs == -10000000, torch.tensor(0, device=accelerator.device), audio_refs)
         batch.pop("audio_ref_attention_mask", None)
         batch.pop("decoder_attention_mask", None)
 
@@ -616,6 +695,8 @@ def main():
     logger.info(f"  Total optimization steps = {total_train_steps:,}")
     if data_args.finetune_use_precomputed_ref_embed:
         logger.info("  Using precomputed reference embeddings")
+    if data_args.finetune_precomputed_ref_embed_path is not None:
+        logger.info(f"  Loading precomputed reference embeddings from {data_args.finetune_precomputed_ref_embed_path}")
     if "attention_mask" in batch and not model_args.audio_ref_encoder_mean_pooling:
         logger.info("  Using attention mask for audio ref encoder")
     else:
@@ -824,8 +905,6 @@ def main():
                         # release eval input batch (in favour of generate)
                         batch = release_memory(batch)
                         # generation
-                        # only run on main process
-                        # with accelerator.main_process_first():
                         for batch in tqdm(
                             generate_dataloader,
                             desc="Evaluating - Generation ...",
@@ -834,10 +913,12 @@ def main():
                         ):
                             generated_audios, audio_refs = generate_step(model, batch, accelerator, autocast_kwargs)
                             # Gather all predictions and targets
-                            generated_audios, prompts = accelerator.pad_across_processes(
-                                (generated_audios, batch["prompt_input_ids"]), dim=1, pad_index=0
+                            generated_audios, audio_refs, prompts = accelerator.pad_across_processes(
+                                (generated_audios, audio_refs, batch["prompt_input_ids"]), dim=1, pad_index=0
                             )
-                            generated_audios, prompts = accelerator.gather_for_metrics((generated_audios, prompts))
+                            generated_audios, audio_refs, prompts = accelerator.gather_for_metrics(
+                                (generated_audios, audio_refs, prompts)
+                            )
                             eval_preds.extend(generated_audios)
                             eval_prompts.extend(prompts.to("cpu"))
                             eval_refs.extend(audio_refs)
@@ -856,7 +937,7 @@ def main():
                     metrics_desc = ""
                     if training_args.predict_with_generate:
                         # Just use the main process to compute the metrics
-                        metric_values, pred_prompts, audios, transcriptions = compute_metrics(
+                        metric_values, pred_prompts, transcriptions = compute_metrics(
                             eval_preds,
                             eval_refs,
                             eval_prompts,
@@ -864,6 +945,7 @@ def main():
                             data_args.per_device_generate_batch_size,
                             prompt_tokenizer,
                             sample_rate,
+                            model_args.audio_ref_encoder_sr,
                             accelerator.device,
                         )
 
@@ -874,7 +956,8 @@ def main():
                                 accelerator,
                                 pred_prompts,
                                 transcriptions,
-                                audios,
+                                eval_preds,
+                                eval_refs,
                                 sampling_rate=sample_rate,
                                 step=cur_step,
                                 prefix="eval",

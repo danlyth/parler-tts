@@ -174,7 +174,7 @@ def log_pred(
                 "Reference": [
                     Audio(
                         ref_audio,
-                        sample_rate=sampling_rate,
+                        sample_rate=16000,  # remove this hard-coding. It's inherited from the WavLM requirements.
                     )
                     for (i, ref_audio) in enumerate(ref_audios[: min(len(ref_audios), 100)])
                 ]

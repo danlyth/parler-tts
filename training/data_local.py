@@ -25,6 +25,7 @@ class DatasetLocal(torch.utils.data.Dataset):
         audio_encoder_eos_token_id: int = None,  # EOS token id for audio encoder
         use_same_file_ref: bool = False,  # whether to use the same audio file as reference
         use_precomputed_ref_embed: bool = False,  # whether to use precomputed reference embeddings, one per style directory
+        precomputed_ref_embed_path: Optional[str] = None,  # path to a single precomputed reference embedding
         return_full_ref_audio: bool = False,  # whether to return the full reference audio file, useful for computing speaking similarity
     ):
         self.root_audio_dir = Path(root_audio_dir)
@@ -43,6 +44,7 @@ class DatasetLocal(torch.utils.data.Dataset):
         self.bos_labels = torch.ones((1, num_codebooks, 1)) * audio_encoder_bos_token_id
         self.use_same_file_ref = use_same_file_ref
         self.use_precomputed_ref_embed = use_precomputed_ref_embed
+        self.precomputed_ref_embed_path = precomputed_ref_embed_path
         self.return_full_ref_audio = return_full_ref_audio
 
         with open(metadata_path, "r") as f:
@@ -131,7 +133,29 @@ class DatasetLocal(torch.utils.data.Dataset):
         # Tokenize the transcription
         transcript_tokens = self.prompt_tokenizer(transcription)["input_ids"]
 
-        if self.use_precomputed_ref_embed:
+        if self.precomputed_ref_embed_path is not None:
+            # Load precomputed reference embeddings
+            ref_embed = torch.load(self.precomputed_ref_embed_path)
+            attention_mask = torch.ones(1)  # we're using mean embeddings, hence this shape
+            if self.return_full_ref_audio:
+                features = {
+                    "audio_ref": audio,
+                    "audio_ref_full": audio_ref_full,
+                    "labels": labels,
+                    "prompt_input_ids": transcript_tokens,
+                    "encoder_outputs": ref_embed,
+                    "attention_mask": attention_mask,
+                }
+            else:
+                features = {
+                    "audio_ref": audio,
+                    "labels": labels,
+                    "prompt_input_ids": transcript_tokens,
+                    "encoder_outputs": ref_embed,
+                    "attention_mask": attention_mask,
+                }
+
+        elif self.use_precomputed_ref_embed:
             # Load precomputed reference embeddings
 
             #################################
