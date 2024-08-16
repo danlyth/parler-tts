@@ -393,6 +393,12 @@ def main():
                 pin_memory=training_args.dataloader_pin_memory,
             )
 
+    if not data_args.use_mds:
+        logger.info("Preparing datasets with accelerate")
+        train_dataloader = accelerator.prepare(train_dataloader)
+        validation_dataloader = accelerator.prepare(validation_dataloader)
+        generate_dataloader = accelerator.prepare(generate_dataloader)
+
     # Define Training Schedule
     # Store some constants
     train_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes
@@ -436,8 +442,12 @@ def main():
         num_training_steps=total_train_steps * accelerator.num_processes,
     )
 
+    # Prepare everything with accelerate
+    logger.info("Preparing model, optimizer and scheduler with accelerate")
+    model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
+
     # Test the dataloaders
-    logger.info("Testing dataloaders")
+    logger.info("Testing dataloaders (after preparing with acclerate)")
     if training_args.do_train:
         logger.info(f"Number of training samples: {len(train_dataloader)}")
         for batch in train_dataloader:
@@ -459,39 +469,6 @@ def main():
         logger.info("Generation data example")
         for key, value in batch.items():
             logger.info(f"{key}: {value.shape}")
-
-    # Prepare everything with accelerate
-    logger.info("Preparing model, optimizer and scheduler with accelerate")
-    model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
-    if not data_args.use_mds:
-        train_dataloader = accelerator.prepare(train_dataloader)
-        validation_dataloader = accelerator.prepare(validation_dataloader)
-        generate_dataloader = accelerator.prepare(generate_dataloader)
-
-        # Test the dataloaders
-        logger.info("AFTER preparing with accelerate")
-        logger.info("Testing dataloaders")
-        if training_args.do_train:
-            logger.info(f"Number of training samples: {len(train_dataloader)}")
-            for batch in train_dataloader:
-                break
-            logger.info("Training data example")
-            for key, value in batch.items():
-                logger.info(f"{key}: {value.shape}")
-        if training_args.do_eval:
-            logger.info(f"Number of validation samples: {len(validation_dataloader)}")
-            for batch in validation_dataloader:
-                break
-            logger.info("Validation data example")
-            for key, value in batch.items():
-                logger.info(f"{key}: {value.shape}")
-        if training_args.predict_with_generate:
-            logger.info(f"Number of generation samples: {len(generate_dataloader)}")
-            for batch in generate_dataloader:
-                break
-            logger.info("Generation data example")
-            for key, value in batch.items():
-                logger.info(f"{key}: {value.shape}")
 
     # Define gradient update step fn
 
