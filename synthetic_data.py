@@ -131,6 +131,9 @@ def main(
     shuffle: bool,
     shuffle_seed: int,
 ):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     mixed_precision = "bf16"
     # accelerator = Accelerator(mixed_precision=mixed_precision)
     accelerator = Accelerator()
@@ -222,7 +225,7 @@ def main(
     for idx, test_sentence in zip(indices, test_sentences):
         overall_start_time = time.time()
         # Skip sentences if we already have a candidate generated in a previous run
-        metadata_path = (Path(output_dir) / str(idx)).with_suffix(".json")
+        metadata_path = (output_dir / str(idx)).with_suffix(".json")
         if metadata_path.exists():
             logger.info(f"Skipping sentence {idx} as it already has a candidate.")
             continue
@@ -423,7 +426,8 @@ def main(
                         "stoi": stois,
                         "si_sdr": si_sdrs,
                     }
-                    metadata_failed_path = (Path(output_dir) / "failed" / str(idx)).with_suffix(".json")
+                    metadata_failed_path = (output_dir / "failed" / str(idx)).with_suffix(".json")
+                    metadata_failed_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(metadata_failed_path, "w") as f:
                         json.dump(metadata, f, indent=4)
 
@@ -436,9 +440,9 @@ if __name__ == "__main__":
     main(
         model_args_path="/shared/production_tts/jordana_tts_args_v3.json",
         audio_ref_embedding_path="/shared/production_tts/wavlm_layer_5_mean_embedding_cos_sim_08.pt",
-        test_sentences_path="/shared/ankit/companion_utts.clean.json",
-        output_dir="/shared/sesame_voice_recordings/recording_session_2024_06/synthetic_data/synthetic_data_2024_08_14",
-        batch_size=16,
+        test_sentences_path="/shared/sesame_voice_recordings/recording_session_2024_06/synthetic_data/companion_utts.no_end_punc.json",
+        output_dir="/shared/sesame_voice_recordings/recording_session_2024_06/synthetic_data/synthetic_data_2024_08_14_no_end_punc",
+        batch_size=8,  # was 16 but I don't think we need that many
         max_num_attempts=8,
         wer_threshold=0.0,
         cos_sim_threshold=0.75,
@@ -446,5 +450,5 @@ if __name__ == "__main__":
         stoi_threshold=0.98,
         si_sdr_threshold=20.0,
         shuffle=True,  # Note, setting to true doesn't work on multi-GPU setup
-        shuffle_seed=12,
+        shuffle_seed=1,
     )
